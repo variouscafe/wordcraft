@@ -61,6 +61,39 @@ Typing, Enter, Backspace, Tab, lists, AutoCorrect and AutoFormat follow Word's o
 - Shell gotcha: `mv`/`cp` may be aliased interactive — use `/bin/mv -f` / `/bin/cp -f`.
 - Parallel agents: separate `CARGO_TARGET_DIR` per agent; edit only the crates you own; delete your target dir when done (disk).
 
+## Local overlay: staying in sync with upstream (LOCAL RULES — this clone only)
+This clone's `origin` is upstream `storytold/wordcraft`, which moves daily. Local changes must
+survive that, and upstream's history is never rewritten. This section and everything under it
+lives only on the `local/main` branch (see below); it is never PR'd upstream.
+- **`main` mirrors `origin/main` exactly — never commit to it.** Sync it with
+  `git fetch origin && git switch main && git merge --ff-only origin/main` (a pull that would
+  merge means something is wrong; stop and fix it, don't force it).
+- **All local work goes on `local/main`** (branch off `main` once: `git switch -c local/main`).
+  Keep commits small and self-contained, each with a `LOCAL:` task tag in the message
+  (`LOCAL: mobile web shell`) — small commits make the next rebase cheap.
+- **Syncing local work is a rebase, never a merge:** on `main` run the ff-only sync above, then
+  `git switch local/main && git rebase main`. In conflicts, upstream usually wins a hunk and the
+  local change is re-applied fresh on top (refactors move the code it patched); only keep local
+  hunks where upstream didn't touch the behaviour. Merging `main` into `local/main` is forbidden
+  — merge commits make every later rebase worse.
+- **Never push `local/main` to `origin`.** It is backed up on the fork
+  `https://github.com/variouscafe/wordcraft` (remote `fork`): after every rebase,
+  `git push -f fork local/main` — force-push is allowed there and nowhere else.
+- **A change that belongs upstream goes by PR from a branch off `main`, pushed to `fork`
+  (`git switch -c <name> main` … `git push -u fork <name>`, then
+  `gh pr create -R storytold/wordcraft`), never from `local/main`.** Once upstream merges it,
+  drop the matching local commit during the next rebase
+  (`git rebase --onto main <sha-before-it> local/main`, or an interactive drop).
+- **After every rebase: `cargo xtask ci` must pass on `local/main` before new work starts** —
+  including `cargo xtask wasm`, since the mobile-responsive work (below) lives in the web build.
+- **Local work in flight: mobile responsive UI.** The mobile target is the web app
+  (`apps/wordcraft-web`) in a phone browser: the desktop app and every upstream-only behaviour
+  stay untouched; narrow-layout changes are gated by a width breakpoint inside `crates/ui-egui`
+  so desktop (`>= ~760 pt`) renders exactly as before. Never break wasm (`cargo xtask wasm`);
+  pin narrow-viewport behaviour with `egui_kittest` tests at phone sizes, like `ribbon_fit`'s
+  tests do for the ribbon.
+- When a rebase conflicts in this file, keep upstream's sections and keep this one.
+
 ## Roadmap
 Progress docs: `ROADMAP.md` (stage, headline numbers, progress log), `docs/target-app-parity.md` (the assessment), `docs/gaps.md` (ranked work list), `docs/roadmap.md` (milestones, Current focus), `docs/architecture.md`, and the parity checklists `docs/file-format-parity.md`, `docs/layout-parity.md`, `docs/typing-parity.md`, `docs/ui-parity.md`, `docs/hardware-parity.md`, `docs/localization-parity.md`. When work lands, update the gap, the parity doc and the progress log, and bump each touched doc's status line and revision history.
 
