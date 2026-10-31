@@ -55,6 +55,12 @@ fn back_chevron_c(band_min_x: f32, center_y: f32, fullscreen: bool, content_left
     pos2(band_min_x + x, center_y)
 }
 
+/// Phone-width layout: below this the Backstage collapses to an icon rail with wrapped template
+/// tiles, and (elsewhere) compact chrome. Desktop windows (≥760 pt) never cross it.
+fn is_narrow(ui: &Ui) -> bool {
+    ui.ctx().input(|i| i.viewport_rect().width()) < 600.0
+}
+
 /// Draws the Backstage side menu and the active page. Without a document only the Home, New, Open
 /// and Options pages work, and it handles Back, Escape, Save, Save As and Close routing.
 pub fn show(app: &mut WordApp, ui: &mut Ui) {
@@ -65,8 +71,13 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         app.ui.backstage_page = "home".into();
     }
     let mac = app.integrated_titlebar;
+    // Phone width: the labelled 200 pt menu plus the page's 40 pt margins leave ~110 pt of
+    // content at 390 pt, so the template tiles overflow the screen. Narrow windows get an
+    // icon rail and slimmer margins instead; desktop windows are pixel-identical.
+    let narrow = is_narrow(ui);
+    let (nav_w, row_h) = if narrow { (64.0, 44.0) } else { (200.0, 38.0) };
     egui::Panel::left("backstage_nav")
-        .exact_size(200.0)
+        .exact_size(nav_w)
         // Fixed width, as in Word: without this egui shows a resize handle that does nothing (#502).
         .resizable(false)
         .frame(egui::Frame::NONE.fill(t.nav).inner_margin(egui::Margin { left: 0, right: 0, top: if mac { 0 } else { 12 }, bottom: 12 }))
@@ -88,8 +99,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 // The hit area is scoped to the chevron, not the whole 200px-wide row (#3041):
                 // the row reads as plain sidebar background next to it, so clicking there must
                 // not also close the File page, same as the macOS chevron fix (#2972) below.
-                let (r, _) = ui.allocate_exact_size(vec2(200.0, 40.0), Sense::hover());
-                let c = pos2(r.min.x + 26.0, r.center().y);
+                let (r, _) = ui.allocate_exact_size(vec2(nav_w, 40.0), Sense::hover());
+                let c = pos2(r.min.x + if narrow { nav_w / 2.0 } else { 26.0 }, r.center().y);
                 let resp = ui.interact(Rect::from_center_size(c, vec2(22.0, r.height())), ui.scope_id().with("backstage_back"), Sense::click());
                 icons::paint(ui.painter(), Rect::from_center_size(c, vec2(18.0, 18.0)), "chevronLeft", egui::Color32::WHITE, egui::Color32::WHITE);
                 resp
@@ -103,7 +114,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             for (id, label, icon) in PAGES {
                 // No document open (#1129): Info, Save, Save As, Print and Export are greyed out.
                 let on = has_document || works_without_document(id);
-                let (r, resp) = ui.add_enabled_ui(on, |ui| ui.allocate_exact_size(vec2(200.0, 38.0), Sense::click())).inner;
+                let (r, resp) = ui.add_enabled_ui(on, |ui| ui.allocate_exact_size(vec2(nav_w, row_h), Sense::click())).inner;
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, on, tl!(label)));
                 let active = app.ui.backstage_page == id;
                 if active {
@@ -112,12 +123,11 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                     ui.painter().rect_filled(r, 0.0, egui::Color32::from_white_alpha(26));
                 }
                 let ink = if on { egui::Color32::WHITE } else { egui::Color32::from_white_alpha(110) };
-                icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 31.0, r.center().y), vec2(18.0, 18.0)), icon, ink, ink);
-                ui.painter().text(
-                    pos2(r.min.x + 52.0, r.center().y),
-                    Align2::LEFT_CENTER,
-                    tl!(label),
-                    if active { semibold(14.0) } else { medium(14.0) },
+                icons::paint(
+                    ui.painter(),
+                    Rect::from_center_size(pos2(if narrow { r.center().x } else { r.min.x + 31.0 }, r.center().y), vec2(18.0, 18.0)),
+                    icon,
+                    ink,
                     ink,
                 );
                 if on
@@ -126,46 +136,60 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 {
                     crate::keytips::badge(ui, Rect::from_min_size(pos2(r.min.x + 16.0, r.min.y), vec2(20.0, 16.0)), letter);
                 }
+                if !narrow {
+                    ui.painter().text(
+                        pos2(r.min.x + 52.0, r.center().y),
+                        Align2::LEFT_CENTER,
+                        tl!(label),
+                        if active { semibold(14.0) } else { medium(14.0) },
+                        ink,
+                    );
+                }
                 if resp.clicked() {
                     go_to_page(app, id);
                 }
             }
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                for (label, id) in [("About", "about"), ("Discord community", "discord")] {
-                    let (r, resp) = ui.allocate_exact_size(vec2(200.0, 32.0), Sense::click());
-                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tl!(label)));
-                    if resp.hovered() {
-                        ui.painter().rect_filled(r, 0.0, egui::Color32::from_white_alpha(26));
-                    }
-                    ui.painter().text(pos2(r.min.x + 22.0, r.center().y), Align2::LEFT_CENTER, tl!(label), regular(13.0), egui::Color32::WHITE);
-                    if resp.clicked() {
-                        if id == "discord" {
-                            let _ = app.run("ui.discord", json!({}));
-                        } else {
-                            app.dialog = crate::dialogs::Dialog::open("about", app);
+            // The footer links need their labels; an icon rail has no room for them.
+            if !narrow {
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    for (label, id) in [("About", "about"), ("Discord community", "discord")] {
+                        let (r, resp) = ui.allocate_exact_size(vec2(200.0, 32.0), Sense::click());
+                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tl!(label)));
+                        if resp.hovered() {
+                            ui.painter().rect_filled(r, 0.0, egui::Color32::from_white_alpha(26));
+                        }
+                        ui.painter().text(pos2(r.min.x + 22.0, r.center().y), Align2::LEFT_CENTER, tl!(label), regular(13.0), egui::Color32::WHITE);
+                        if resp.clicked() {
+                            if id == "discord" {
+                                let _ = app.run("ui.discord", json!({}));
+                            } else {
+                                app.dialog = crate::dialogs::Dialog::open("about", app);
+                            }
                         }
                     }
-                }
+                });
+            }
+        });
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(t.ribbon).inner_margin(if narrow { egui::Margin::symmetric(12, 16) } else { egui::Margin::symmetric(40, 30) }))
+        .show(ui, |ui| {
+            // The Print page fills the pane and scrolls its settings and its preview itself (#1156).
+            if app.ui.backstage_page == "print" {
+                export_page(app, ui);
+                return;
+            }
+            egui::ScrollArea::vertical().show(ui, |ui| match app.ui.backstage_page.as_str() {
+                "home" => home_page(app, ui),
+                "new" => new_page(app, ui),
+                "open" => open_page(app, ui),
+                "saveAs" => save_as_page(app, ui),
+                "info" => info_page(app, ui),
+                "recover" => recovery_page(app, ui),
+                "print" | "export" => export_page(app, ui),
+                "options" => crate::options::page(app, ui),
+                _ => home_page(app, ui),
             });
         });
-    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.ribbon).inner_margin(egui::Margin::symmetric(40, 30))).show(ui, |ui| {
-        // The Print page fills the pane and scrolls its settings and its preview itself (#1156).
-        if app.ui.backstage_page == "print" {
-            export_page(app, ui);
-            return;
-        }
-        egui::ScrollArea::vertical().show(ui, |ui| match app.ui.backstage_page.as_str() {
-            "home" => home_page(app, ui),
-            "new" => new_page(app, ui),
-            "open" => open_page(app, ui),
-            "saveAs" => save_as_page(app, ui),
-            "info" => info_page(app, ui),
-            "recover" => recovery_page(app, ui),
-            "print" | "export" => export_page(app, ui),
-            "options" => crate::options::page(app, ui),
-            _ => home_page(app, ui),
-        });
-    });
 }
 
 /// Recovery is a separate copy. Leaving this page never discards it.
@@ -350,12 +374,23 @@ fn home_page(app: &mut WordApp, ui: &mut Ui) {
             "Good evening"
         },
     );
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing = vec2(18.0, 0.0);
-        for (label, template) in TEMPLATES.into_iter().take(HOME_TEMPLATES) {
-            template_tile(ui, app, label, template);
-        }
-    });
+    if is_narrow(ui) {
+        // Phone width: wrap instead of one overflowing row (Word's mobile template list is
+        // one or two tiles per row as well).
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(18.0, 18.0);
+            for (label, template) in TEMPLATES.into_iter().take(HOME_TEMPLATES) {
+                template_tile(ui, app, label, template);
+            }
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(18.0, 0.0);
+            for (label, template) in TEMPLATES.into_iter().take(HOME_TEMPLATES) {
+                template_tile(ui, app, label, template);
+            }
+        });
+    }
     ui.add_space(8.0);
     let more = ui.add(egui::Label::new(egui::RichText::new(tl!("More templates →")).font(medium(13.5)).color(t.accent)).sense(Sense::click()));
     if more.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -372,7 +407,11 @@ fn new_page(app: &mut WordApp, ui: &mut Ui) {
     heading(ui, "New");
     let id = app.window_id("backstage_template_search");
     let mut query = ui.ctx().data(|d| d.get_temp::<String>(id)).unwrap_or_default();
-    let search = ui.add(egui::TextEdit::singleline(&mut query).hint_text(tl!("Search for templates")).desired_width(360.0));
+    let search = ui.add(egui::TextEdit::singleline(&mut query).hint_text(tl!("Search for templates")).desired_width(if is_narrow(ui) {
+        ui.available_width()
+    } else {
+        360.0
+    }));
     if search.changed() {
         ui.ctx().data_mut(|d| d.insert_temp(id, query.clone()));
     }
