@@ -1111,7 +1111,7 @@ fn handle_secondary_selection(app: &mut WordApp, resp: &egui::Response, rects: &
     if secondary_clicked
         && let Some(range) = app.session.cell_range()
         && let Some(p) = resp.interact_pointer_pos()
-        && let Some((page, x, y)) = page_at(&rects, &layout, geo.scale, p)
+        && let Some((page, x, y)) = page_at(rects, layout, geo.scale, p)
     {
         let at = wordcraft_geom::Point::new(x, y);
         let on_cells =
@@ -1124,7 +1124,7 @@ fn handle_secondary_selection(app: &mut WordApp, resp: &egui::Response, rects: &
     // Right-click in an equation puts the caret there and opens the equation menu.
     if secondary_clicked
         && let Some(p) = resp.interact_pointer_pos()
-        && let Some((page, x, y)) = page_at(&rects, &layout, geo.scale, p)
+        && let Some((page, x, y)) = page_at(rects, layout, geo.scale, p)
     {
         match layout.equation_hit(page, x, y, app.session.sel.focus.story) {
             Some((at, inner)) => {
@@ -1141,7 +1141,7 @@ fn handle_secondary_selection(app: &mut WordApp, resp: &egui::Response, rects: &
     if secondary_clicked
         && app.session.math.is_none()
         && let Some(p) = resp.interact_pointer_pos()
-        && let Some((page, x, y)) = page_at(&rects, &layout, geo.scale, p)
+        && let Some((page, x, y)) = page_at(rects, layout, geo.scale, p)
     {
         if crate::objects::select_at(app, layout, rects, geo.scale, p) {
             app.canvas.context_issue = None;
