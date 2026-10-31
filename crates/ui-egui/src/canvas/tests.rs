@@ -4841,3 +4841,57 @@ fn the_view_key_changes_when_a_drag_takes_an_object_off_the_page() {
     assert_ne!(hidden, view_key(&app, false, None), "the page without the dragged object is rendered again");
     assert_eq!(hidden, view_key(&app, false, Some(&object)), "the same drag keeps the key: no re-render every frame");
 }
+
+/// Touch selection grips (#mobile): after touch input, a selection shows a grip at each end;
+/// dragging the end grip moves that end and leaves the other in place — the phone's way of
+/// adjusting a selection, where the mouse's drag-select doesn't exist.
+#[test]
+fn touch_grips_adjust_the_selection() {
+    use egui_kittest::kittest::Queryable;
+    use serde_json::json;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run();
+    h.state_mut().session.run("select.text", &json!({"text": "Studio"})).unwrap();
+    h.run();
+    let before = h.state().session.sel.ordered().1;
+    // No touch yet: no grips.
+    assert!(h.query_all_by_label("Selection end grip").next().is_none(), "no grip before touch");
+    // Touch input makes them appear.
+    h.event(egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase: egui::TouchPhase::Start,
+        pos: egui::pos2(195.0, 400.0),
+        force: None,
+    });
+    h.run();
+    let grip = h.get_by_role_and_label(egui::accesskit::Role::Button, "Selection end grip");
+    let start = grip.rect().center();
+    // Drag the end grip to the right, a little below (stays in the same line of text).
+    h.event(egui::Event::PointerMoved(start));
+    h.run();
+    h.event(egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run();
+    h.event(egui::Event::PointerMoved(start + egui::vec2(30.0, 0.0)));
+    h.run();
+    h.event(egui::Event::PointerButton {
+        pos: start + egui::vec2(30.0, 0.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    h.run();
+    let after = h.state().session.sel.ordered().1;
+    assert!(after != before, "the end grip moved the selection's end: {before:?} -> {after:?}");
+    assert_eq!(h.state().session.sel.ordered().0, h.state().session.sel.ordered().0, "the start stays");
+}

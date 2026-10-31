@@ -173,6 +173,9 @@ pub struct CanvasState {
     pub eq_options: Option<EquationFrame>,
     /// Screen rect of the selection's first line, for the floating mini toolbar.
     pub mini_anchor: Option<Rect>,
+    /// When touch input was last seen (`logic` stamps it): for that while afterwards, a
+    /// selection shows its finger grips, which a mouse user never needs.
+    pub touch_at: Option<f64>,
     /// The selection the mini toolbar was put away for by a click outside the document (the
     /// ribbon, a pane, the status bar); it comes back when the selection changes.
     pub mini_dismissed: Option<wordcraft_engine::Selection>,
@@ -341,6 +344,7 @@ impl Default for CanvasState {
             textures: HashMap::new(),
             tiles: HashMap::new(),
             page_keys: PageKeys::default(),
+            touch_at: None,
             markup_facts: std::cell::Cell::new(None),
             scroll_to_caret: true,
             keep_view: false,
@@ -1107,7 +1111,7 @@ fn handle_secondary_selection(app: &mut WordApp, resp: &egui::Response, rects: &
     if secondary_clicked
         && let Some(range) = app.session.cell_range()
         && let Some(p) = resp.interact_pointer_pos()
-        && let Some((page, x, y)) = page_at(rects, layout, geo.scale, p)
+        && let Some((page, x, y)) = page_at(&rects, &layout, geo.scale, p)
     {
         let at = wordcraft_geom::Point::new(x, y);
         let on_cells =
@@ -1120,7 +1124,7 @@ fn handle_secondary_selection(app: &mut WordApp, resp: &egui::Response, rects: &
     // Right-click in an equation puts the caret there and opens the equation menu.
     if secondary_clicked
         && let Some(p) = resp.interact_pointer_pos()
-        && let Some((page, x, y)) = page_at(rects, layout, geo.scale, p)
+        && let Some((page, x, y)) = page_at(&rects, &layout, geo.scale, p)
     {
         match layout.equation_hit(page, x, y, app.session.sel.focus.story) {
             Some((at, inner)) => {
@@ -1137,7 +1141,7 @@ fn handle_secondary_selection(app: &mut WordApp, resp: &egui::Response, rects: &
     if secondary_clicked
         && app.session.math.is_none()
         && let Some(p) = resp.interact_pointer_pos()
-        && let Some((page, x, y)) = page_at(rects, layout, geo.scale, p)
+        && let Some((page, x, y)) = page_at(&rects, &layout, geo.scale, p)
     {
         if crate::objects::select_at(app, layout, rects, geo.scale, p) {
             app.canvas.context_issue = None;
@@ -1430,7 +1434,69 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         // Anchor only to visible selection geometry. A selection can span pages, and its
         // document-first line may be scrolled offscreen; using it would pin the toolbar to an
         // old screen position unrelated to the visible selection.
+        let grip_ends = (screen_rects.first().copied(), screen_rects.last().copied());
         app.canvas.mini_anchor = crate::mini_toolbar::visible_anchor(screen_rects, visible_clip);
+        // Touch selection grips (as on a phone): for a while after touch input, a grip at each
+        // end of the selection adjusts it by finger — the other end stays put. A mouse has its
+        // own drag and never sees these. Own foreground layer: the scroll area's response is
+        // registered after the page's content, so inside it the page would take the press.
+        if app.canvas.touch_at.is_some_and(|t| ui.input(|i| i.time - t) < 15.0)
+            && let Some((first, last)) = grip_ends.0.zip(grip_ends.1)
+            && !app.canvas.dragging
+            && !app.canvas.context_menu_open
+            && app.session.column_segments().is_none()
+            && app.session.cell_range().is_none()
+        {
+            let ctx = ui.ctx().clone();
+            egui::Area::new(egui::Id::unique("touch_sel_grips")).order(egui::Order::Foreground).fixed_pos(Pos2::ZERO).interactable(true).show(
+                &ctx,
+                |aui| {
+                    aui.set_clip_rect(visible_clip);
+                    let ap = aui.painter().clone();
+                    let (a, b) = app.session.sel.ordered();
+                    for (end, fixed, moving, at) in
+                        [("start", b.clone(), a.clone(), pos2(first.min.x, first.max.y)), ("end", a.clone(), b.clone(), pos2(last.max.x, last.max.y))]
+                    {
+                        // A zoomed page is wider than the phone's screen and the selection's
+                        // end can sit off it: clamp the grip into view (as Word mobile does);
+                        // the stem still points at the true end.
+                        let at = pos2(
+                            at.x.clamp(visible_clip.min.x + 14.0, visible_clip.max.x - 14.0),
+                            at.y.clamp(visible_clip.min.y + 14.0, visible_clip.max.y - 14.0),
+                        );
+                        let c = Rect::from_center_size(at + vec2(0.0, 9.0), egui::vec2(18.0, 18.0));
+                        let grip = aui.interact(c, egui::Id::unique("touch_sel_grip").with(end), egui::Sense::click_and_drag());
+                        grip.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Button,
+                                true,
+                                if end == "start" { tl!("Selection start grip") } else { tl!("Selection end grip") },
+                            )
+                        });
+                        if grip.drag_started() {
+                            // Extend keeps the anchor, so the grip's own end becomes the moving one.
+                            app.session.sel.anchor = fixed;
+                            app.session.sel.focus = moving;
+                        }
+                        if grip.dragged()
+                            && let Some(p) = grip.interact_pointer_pos()
+                            && let Some((page, x, y)) = page_at(&rects, &layout, geo.scale, p)
+                            && let Some(pos) = layout.hit(page, x, y, app.session.sel.focus.story)
+                            && pos != app.session.sel_ends().focus
+                        {
+                            // Straight to the session, as the page's own drag does: the app's
+                            // `run` would scroll on every frame.
+                            let pj = serde_json::to_value(&pos).unwrap_or_default();
+                            let _ = app.session.run("caret.set", &json!({"pos": pj, "extend": true}));
+                            app.session.page_hint = page;
+                        }
+                        ap.line_segment([at, at + vec2(0.0, 9.0)], egui::Stroke::new(2.5, t.accent));
+                        ap.circle_filled(at + vec2(0.0, 9.0), 9.0, t.accent);
+                    }
+                },
+            );
+        }
+
         // Content controls: the frame of the one the caret is in (all of them in Design Mode).
         crate::content_controls::paint(app, &painter, &t, &layout, &rects, geo.scale);
         paint_read_aloud_highlight(app, &painter, &layout, &rects, &geo, &t);
