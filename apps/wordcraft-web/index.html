@@ -5,8 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#e6e6e6">
   <title>WordCraft</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
   <link data-trunk rel="icon" href="../../assets/app-icon/wordcraft.ico" />
   <link data-trunk rel="rust" data-bin="wordcraft-web" data-wasm-opt="z" data-weak-refs />
+  <link data-trunk rel="copy-file" href="manifest.webmanifest" />
+  <link data-trunk rel="copy-file" href="../../assets/app-icon/wordcraft.ico" data-target-name="wordcraft.ico" />
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #e6e6e6; overscroll-behavior: none; }
     /* The safe-area padding keeps the canvas inside notches and the home-indicator area

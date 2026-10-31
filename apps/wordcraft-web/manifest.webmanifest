@@ -1,0 +1,14 @@
+{
+  "name": "WordCraft",
+  "short_name": "WordCraft",
+  "description": "An open-source word processor",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#e6e6e6",
+  "theme_color": "#e6e6e6",
+  "icons": [
+    { "src": "./wordcraft.ico", "sizes": "any", "type": "image/x-icon", "purpose": "any" }
+  ]
+}
