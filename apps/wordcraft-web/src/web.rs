@@ -38,6 +38,9 @@ pub fn start() {
         {
             log::error!("no unsaved-changes guard: {e}");
         }
+        if let Err(e) = keyboard_viewport(&canvas) {
+            log::error!("no keyboard viewport handling: {e}");
+        }
         let mut options = eframe::WebOptions::default();
         if query().contains("webgl")
             && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
@@ -411,6 +414,35 @@ fn load_system_fonts(ctx: egui::Context, messages: Rc<RefCell<Vec<String>>>) {
 fn animations_enabled() -> Box<dyn Fn() -> Option<bool>> {
     let reduce = web_sys::window().and_then(|w| w.match_media("(prefers-reduced-motion: reduce)").ok().flatten());
     Box::new(move || reduce.as_ref().map(|query| !query.matches()))
+}
+
+/// iOS keeps the layout viewport full-size when the on-screen keyboard opens, so the editor's
+/// lower part would sit behind it (Android already resizes the layout; a desktop has no
+/// on-screen keyboard): size and place the canvas at the visual viewport, and back over the
+/// whole window when the keyboard closes. eframe's resize observer picks the change up and
+/// the app relayouts. Where the visual viewport is the window (everywhere else) this sets the
+/// canvas to exactly the window's size, which is what it already was.
+fn keyboard_viewport(canvas: &web_sys::HtmlCanvasElement) -> Result<(), String> {
+    let Some(viewport) = web_sys::window().and_then(|w| w.visual_viewport()) else {
+        return Ok(()); // no visual viewport API: nothing to follow
+    };
+    let vp = viewport.clone();
+    let element = canvas.clone();
+    let fit = move || {
+        let style = element.style();
+        let _ = style.set_property("width", &format!("{}px", vp.width()));
+        let _ = style.set_property("height", &format!("{}px", vp.height()));
+        let _ = style.set_property("top", &format!("{}px", vp.offset_top()));
+        let _ = style.set_property("left", &format!("{}px", vp.offset_left()));
+    };
+    fit();
+    let on_change = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(fit);
+    let handler = on_change.as_ref().unchecked_ref();
+    viewport.add_event_listener_with_callback("resize", handler).map_err(|e| format!("{e:?}"))?;
+    viewport.add_event_listener_with_callback("scroll", handler).map_err(|e| format!("{e:?}"))?;
+    // The listeners live as long as the page.
+    on_change.forget();
+    Ok(())
 }
 
 /// Closing, reloading or leaving the tab with unsaved changes asks first. Browsers show their own
