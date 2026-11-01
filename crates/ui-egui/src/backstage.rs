@@ -605,6 +605,9 @@ fn open_list(app: &mut WordApp, ui: &mut Ui) {
     let shown = app.ui.recent.iter().take(app.ui.recent_shown()).cloned().collect::<Vec<_>>();
     let file_name = |p: &str| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(p.to_string());
     let names = shown.iter().map(|p| file_name(p)).collect::<Vec<_>>();
+    // In the browser the entry is a name the host keeps the document under, not a place on
+    // disk; the line under the name says where it is instead of repeating the name.
+    let kept = app.services.open_stored_document.is_some().then(|| tl!("Kept in this browser").to_string());
     for (p, name) in shown.iter().zip(&names) {
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(700.0), 40.0), Sense::click());
         // Two documents with the same file name are told apart by their path, as on screen.
@@ -615,7 +618,7 @@ fn open_list(app: &mut WordApp, ui: &mut Ui) {
         }
         icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 18.0, r.center().y), vec2(22.0, 22.0)), "printLayout", t.icon, t.accent);
         ui.painter().text(pos2(r.min.x + 40.0, r.min.y + 13.0), Align2::LEFT_CENTER, name, medium(13.0), t.text);
-        ui.painter().text(pos2(r.min.x + 40.0, r.min.y + 29.0), Align2::LEFT_CENTER, p, regular(11.0), t.text_dim);
+        ui.painter().text(pos2(r.min.x + 40.0, r.min.y + 29.0), Align2::LEFT_CENTER, kept.as_deref().unwrap_or(p), regular(11.0), t.text_dim);
         if resp.clicked() {
             let failed = open_recent(app, p).err();
             ui.ctx().data_mut(|d| d.insert_temp(open_error_id(), failed.unwrap_or_default()));
@@ -651,7 +654,15 @@ pub(crate) fn forget_save_as_error(ctx: &egui::Context) {
 
 /// Open a file from the Recent list. A file that can't be opened (deleted, moved, unreadable)
 /// leaves File open so the list can say why, rather than closing it on a greyed-out window.
+/// In the browser the entry is a name the host kept the document under, not a path: the host
+/// reopens it (the bytes arrive like a picked file's), or says it no longer has it.
 pub(crate) fn open_recent(app: &mut WordApp, path: &str) -> Result<(), String> {
+    if let Some(open_stored) = &app.services.open_stored_document {
+        open_stored(path);
+        app.ui.backstage = false;
+        app.canvas.want_focus = true;
+        return Ok(());
+    }
     app.open_file(path, None)?;
     app.ui.backstage = false;
     app.canvas.want_focus = true;
