@@ -165,6 +165,12 @@ impl WordApp {
             // An export is a copy, and so is a save in a format that doesn't keep everything (a
             // page image, plain text): the document itself still has unsaved changes.
             let marked_saved = matches!(id, "file.save" | "file.saveAs") && keeps_everything(&name);
+            // The browser keeps the document itself under its name, so Recent reopens the saved
+            // state on a later visit; exports and copies stay out (the name would shadow the
+            // document's own entry).
+            if marked_saved && let Some(store) = &self.services.store_document {
+                store(&name, &bytes);
+            }
             // Save As tells the host page the document is now this file, which it only is when the
             // save marks it saved. A Save under a name the page never sent (an untitled document,
             // an imported .doc saved as .docx) is a new file too, never an overwrite.

@@ -6364,6 +6364,53 @@ fn an_existing_list_picked_on_the_web_loads_recipients() {
     assert!(!a.recipient_list_pending);
 }
 
+/// Web (#local): a document that arrives through the inbox is kept under its name for Recent,
+/// and so is every Save of it — an export or a copy is not the document and stays out. Junk
+/// that fails to open is kept by no one.
+#[test]
+fn web_documents_are_kept_for_recent_on_open_and_save() {
+    let mut a = typed();
+    let kept = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, usize)>::new()));
+    let kept_seen = kept.clone();
+    a.services.store_document = Some(Box::new(move |name, bytes| kept_seen.borrow_mut().push((name.to_string(), bytes.len()))));
+    a.services.download = Some(Box::new(|_: &str, _: &[u8]| Ok(())));
+    let inbox: Inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    a.services.inbox = Some(inbox.clone());
+    inbox.lock().unwrap().push(("notes.txt".into(), b"A plain text document.\n".to_vec()));
+    a.drain_inbox();
+    assert_eq!(*kept.borrow(), vec![("notes.txt".to_string(), "A plain text document.\n".len())], "the opened document is kept");
+    // A Save writes the document itself: kept, under its .docx name.
+    a.run("file.save", json!({})).unwrap();
+    let saved = kept.borrow().last().cloned();
+    assert!(saved.as_ref().is_some_and(|(name, bytes)| name.ends_with(".docx") && *bytes > 100), "a save keeps the document: {saved:?}");
+    let count = kept.borrow().len();
+    // An export is a copy of the document, not the document.
+    a.run("file.exportPdf", json!({})).unwrap();
+    assert_eq!(kept.borrow().len(), count, "an export is not kept");
+    // Junk named like a document doesn't open and isn't kept.
+    inbox.lock().unwrap().push(("junk.docx".into(), b"not a document".to_vec()));
+    a.drain_inbox();
+    assert_eq!(kept.borrow().len(), count, "what didn't open is kept by no one");
+}
+
+/// Web (#local): Recent reopens the kept copy through the host rather than a path — without
+/// the hook (the desktop) the entry still opens from the file system, and a missing file is
+/// the error it always was.
+#[test]
+fn recent_reopens_the_kept_copy_in_the_browser() {
+    let mut a = typed();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    a.services.open_stored_document = Some(Box::new(move |name| seen.borrow_mut().push(name.to_string())));
+    a.ui.backstage = true;
+    assert!(crate::backstage::open_recent(&mut a, "notes.txt").is_ok());
+    assert_eq!(*asked.borrow(), vec!["notes.txt".to_string()], "the host is asked for the kept copy");
+    assert!(!a.ui.backstage, "File closes as an open does");
+    // Desktop: no hook, a path that isn't there is an error the list can show.
+    let mut a = typed();
+    assert!(crate::backstage::open_recent(&mut a, "/no/such/document.docx").is_err());
+}
+
 /// Issue #859: lifting the pen jumped the view back to the caret, usually on page 1. Drawing
 /// leaves the caret where it was, so the view stays on the ink; typing still follows the caret.
 #[test]

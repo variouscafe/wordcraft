@@ -446,7 +446,15 @@ impl WordApp {
                 placed_picture = Self::placed_in_text(&r);
                 r
             } else {
-                self.run("file.open", json!({"path": name, "data": wordcraft_engine::cmd::insert::base64_encode(&bytes)}))
+                let r = self.run("file.open", json!({"path": name, "data": wordcraft_engine::cmd::insert::base64_encode(&bytes)}));
+                // The browser keeps what opened under its name, so Recent can reopen it without
+                // the picker; a document that didn't open is kept by no one.
+                if r.is_ok()
+                    && let Some(store) = &self.services.store_document
+                {
+                    store(&name, &bytes);
+                }
+                r
             };
             if r.is_ok() {
                 self.ui.backstage = false;

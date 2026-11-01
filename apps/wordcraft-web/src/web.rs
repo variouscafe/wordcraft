@@ -57,6 +57,8 @@ pub fn start() {
                     }
                     // Fonts the user added on an earlier visit (#582); the app notices them arrive.
                     font_store::load_all(cc.egui_ctx.clone());
+                    // Ask that the browser not evict the kept documents and fonts under pressure.
+                    crate::doc_store::persist();
                     let inbox: Inbox = Inbox::default();
                     let pasted: Inbox = Inbox::default();
                     if let Err(e) = listen_for_pasted_pictures(pasted.clone(), cc.egui_ctx.clone()) {
@@ -256,6 +258,9 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
     let save_ctx = ctx.clone();
     let font_ctx = ctx.clone();
     let font_messages = messages.clone();
+    let doc_inbox = inbox.clone();
+    let doc_ctx = ctx.clone();
+    let doc_messages = messages.clone();
     Services {
         open_async: Some(Box::new(move |purpose: &str| {
             let inbox = open_inbox.clone();
@@ -298,6 +303,22 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
         animations_enabled: Some(animations_enabled()),
         store_font: Some(Box::new(font_store::store)),
         forget_font: Some(Box::new(font_store::forget)),
+        // Documents are kept in the browser's file system so Recent reopens them (#local);
+        // a name the browser no longer holds says so on the status bar.
+        store_document: Some(Box::new(crate::doc_store::store)),
+        open_stored_document: Some(Box::new(move |name: &str| {
+            let (inbox, ctx, messages) = (doc_inbox.clone(), doc_ctx.clone(), doc_messages.clone());
+            let asked = name.to_string();
+            crate::doc_store::open(name, move |bytes| {
+                match bytes {
+                    Some(bytes) => inbox.lock().unwrap_or_else(|e| e.into_inner()).push((asked, bytes)),
+                    None => messages.borrow_mut().push(
+                        wordcraft_ui_egui::i18n::t("This document isn't kept in this browser anymore — open it from your files again.").to_string(),
+                    ),
+                }
+                ctx.request_repaint();
+            });
+        })),
         load_system_fonts: Some(Box::new(move || {
             load_system_fonts(font_ctx.clone(), font_messages.clone());
         })),

@@ -80,6 +80,15 @@ pub struct Services {
     pub store_font: Option<Box<dyn Fn(&str, &[u8])>>,
     /// Web: forget a stored font (its stored file name) once the user removes it.
     pub forget_font: Option<Box<dyn Fn(&str)>>,
+    /// Web: keep a document's own bytes under its name (the web shell keeps them in the
+    /// browser's file system), so Recent reopens it on a later visit without the file picker.
+    /// Fire-and-forget: what fails to keep is the host's to log, and the document works on.
+    pub store_document: Option<Box<dyn Fn(&str, &[u8])>>,
+    /// Web: reopen the document this name names from what [`Self::store_document`] kept. The
+    /// bytes arrive asynchronously through [`Self::inbox`], like a picked file; a document the
+    /// host doesn't hold is the host's to report. Without the hook (desktop) the name opens as
+    /// a path from the file system, as it always did.
+    pub open_stored_document: Option<Box<dyn Fn(&str)>>,
     /// Web: request browser to query and load local installed fonts (`window.queryLocalFonts()`).
     pub load_system_fonts: Option<Box<dyn Fn()>>,
     /// Desktop: File › Options › General › Make WordCraft the default for Word documents (#295),
