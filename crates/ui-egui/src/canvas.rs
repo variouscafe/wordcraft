@@ -167,6 +167,9 @@ pub struct CanvasState {
     /// The zoom a phone viewer's double-tap zoomed away from, to restore on the next double-tap.
     /// `None` while the page sits at its own zoom. Reset with every document.
     pub phone_zoom_out: Option<f32>,
+    /// #mobile: the page hasn't been fitted to the phone's width yet (a document's first frames
+    /// there, and every document not seen before). A window the mouse uses stays untouched.
+    pub phone_fit_pending: bool,
     pub context_issue: Option<serde_json::Value>,
     pub context_synonyms: Option<serde_json::Value>,
     /// The right-click context menu is open (the mini toolbar stands down while it is).
@@ -312,6 +315,7 @@ impl CanvasState {
             read_viewport: old.read_viewport,
             web_viewport: old.web_viewport,
             scroll_to_caret: !seen,
+            phone_fit_pending: !seen,
             ime_reset,
             ..CanvasState::default()
         };
@@ -387,6 +391,7 @@ impl Default for CanvasState {
             want_focus: true,
             phone_editing: false,
             phone_zoom_out: None,
+            phone_fit_pending: true,
             context_issue: None,
             context_synonyms: None,
             obj_drag: None,
@@ -788,6 +793,23 @@ fn update_canvas_scroll_state(
     // The viewport barely moves between frames; the auto-scroll decides this frame's scroll before
     // the scroll area is built, so it reads last frame's viewport.
     app.canvas.viewport = Some(out.inner_rect);
+    // #mobile: a phone opens a document fitted to the page's width — the page whole across the
+    // screen, no sideways pan for every line, the reading size a double-tap away. A document
+    // first drawn in a window the mouse uses is never fitted (a later narrowing doesn't zoom
+    // under anyone), and neither is one already seen: it keeps the zoom it was left at.
+    if app.canvas.phone_fit_pending {
+        if !crate::responsive::is_phone(ui) {
+            app.canvas.phone_fit_pending = false;
+        } else if !app.session.view.read_mode
+            && app.session.view.mode == wordcraft_layout::ViewMode::Print
+            && let Some(pw) = layout.pages.first().map(|p| crate::canvas::geometry::sane_dim(p.w, 1e5))
+            && out.inner_rect.width() > 50.0
+        {
+            let z = ((out.inner_rect.width() - 2.0 * GAP - 20.0) / pw / PX_PER_PT).clamp(0.1, 5.0);
+            app.canvas.phone_fit_pending = false;
+            let _ = app.run("view.zoom", json!({"value": (z * 100.0).round() as u64}));
+        }
+    }
 }
 
 fn update_canvas_focus(app: &mut WordApp, ui: &mut Ui, resp: &egui::Response, ime_geometry: Option<(Rect, Rect)>, ime_interrupt: bool) {
