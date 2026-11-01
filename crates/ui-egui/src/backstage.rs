@@ -55,10 +55,10 @@ fn back_chevron_c(band_min_x: f32, center_y: f32, fullscreen: bool, content_left
     pos2(band_min_x + x, center_y)
 }
 
-/// Phone-width layout: below this the Backstage collapses to an icon rail with wrapped template
-/// tiles, and (elsewhere) compact chrome. Desktop windows (≥760 pt) never cross it.
+/// Phone-width layout: below the shared breakpoint (crate::responsive) the Backstage collapses
+/// to an icon rail with wrapped template tiles. Desktop windows (≥760 pt) never cross it.
 fn is_narrow(ui: &Ui) -> bool {
-    ui.ctx().input(|i| i.viewport_rect().width()) < 600.0
+    crate::responsive::is_phone(ui)
 }
 
 /// Draws the Backstage side menu and the active page. Without a document only the Home, New, Open

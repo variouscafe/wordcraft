@@ -64,6 +64,7 @@ pub mod print_page;
 pub mod printing;
 pub mod proofing_pane;
 pub mod read_aloud;
+pub mod responsive;
 pub mod ribbon;
 pub mod ribbon_fit;
 pub mod ruler_tabs;
