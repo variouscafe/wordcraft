@@ -1508,8 +1508,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         // Alignment previews can move the selected text while the pointer is still over a mini
         // toolbar button. Keep the bar anchored to the live selection until the preview ends, or
         // it can move out from under the pointer and flicker between preview and live layouts.
-        let anchor_rects = if app.canvas.command_previewed.is_some() { live_selection_screen_rects(app, &rects, geo.scale) } else { screen_rects };
         let grip_ends = (screen_rects.first().copied(), screen_rects.last().copied());
+        let anchor_rects = if app.canvas.command_previewed.is_some() { live_selection_screen_rects(app, &rects, geo.scale) } else { screen_rects };
         app.canvas.mini_anchor = crate::mini_toolbar::visible_anchor(anchor_rects, visible_clip);
         // Touch selection grips (as on a phone): for a while after touch input, a grip at each
         // end of the selection adjusts it by finger — the other end stays put. A mouse has its
