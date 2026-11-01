@@ -5076,21 +5076,17 @@ fn the_floating_toolbar_waits_for_editing() {
     );
     h.run_steps(2);
     let toolbar = |h: &egui_kittest::Harness<'_, WordApp>| h.ctx.data(|d| d.get_temp::<[Rect; 2]>(crate::mini_toolbar::shown_id()));
-    // A double-tap selects a word; reading never shows the toolbar over it.
-    let at = egui::pos2(195.0, 480.0);
-    for _ in 0..2 {
-        h.event(egui::Event::PointerMoved(at));
-        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-        h.run_steps(2);
-        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
-        h.run_steps(2);
-    }
-    assert!(!h.state().session.sel.is_collapsed(), "the double-tap selected a word");
+    // A selection while reading (a long-press to copy); the toolbar never shows over it.
+    // (The double-tap is the viewer's zoom now, so the selection comes as a command would.)
+    h.state_mut().session.run("select.text", &serde_json::json!({"text": "Studio"})).unwrap();
+    h.run_steps(2);
+    assert!(!h.state().session.sel.is_collapsed(), "a selection exists while reading");
     assert!(toolbar(&h).is_none(), "the toolbar stays away while the page reads");
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
     h.run_steps(3);
     // A press on the chrome (Edit itself) puts the bar away for that selection, as it always
-    // did; a fresh selection while editing brings it over the text.
+    // did; a fresh selection while editing brings it over the text. A double-tap selects the
+    // word there, the editing page's way.
     let other = egui::pos2(120.0, 480.0);
     for _ in 0..2 {
         h.event(egui::Event::PointerMoved(other));
@@ -5132,4 +5128,103 @@ fn a_reading_phone_page_shows_no_ribbon_but_carries_file() {
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
     h.run_steps(3);
     assert!(h.query_all_by_label("Home").next().is_some(), "Edit shows the ribbon again");
+}
+
+/// #mobile: a viewer's double-tap zooms the page about the finger, twice the page's fit, and
+/// the next double-tap goes back to the zoom the page had. A double-tap while editing still
+/// selects the word.
+#[test]
+fn a_double_tap_zooms_a_reading_page_and_back() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let tap = |h: &mut egui_kittest::Harness<'_, WordApp>, at: egui::Pos2, touch: bool| {
+        if touch {
+            h.event(egui::Event::Touch {
+                device_id: egui::TouchDeviceId(0),
+                id: egui::TouchId(0),
+                phase: egui::TouchPhase::Start,
+                pos: at,
+                force: None,
+            });
+        }
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run_steps(2);
+        if touch {
+            h.event(egui::Event::Touch {
+                device_id: egui::TouchDeviceId(0),
+                id: egui::TouchId(0),
+                phase: egui::TouchPhase::End,
+                pos: at,
+                force: None,
+            });
+        }
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(2);
+    };
+    let at = egui::pos2(195.0, 480.0);
+    let rest = h.state().session.view.zoom;
+    // Reading: the double-tap zooms in.
+    tap(&mut h, at, true);
+    tap(&mut h, at, true);
+    h.run_steps(4);
+    let zoomed = h.state().session.view.zoom;
+    assert!(zoomed > rest, "the double-tap zoomed in: {rest} -> {zoomed}");
+    assert!(h.state().canvas.phone_zoom_out.is_some(), "the rest zoom is kept to restore");
+    // And back out on the next one — after reading a while, so the taps count as a fresh pair.
+    h.run_steps(70);
+    tap(&mut h, at, true);
+    tap(&mut h, at, true);
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.zoom, rest, "the second double-tap restores the zoom");
+    assert!(h.state().canvas.phone_zoom_out.is_none(), "nothing left to restore");
+    // While editing, the same double-tap selects a word instead.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    let sel = h.state().session.sel.clone();
+    tap(&mut h, at, true);
+    tap(&mut h, at, true);
+    h.run_steps(2);
+    assert!(!h.state().session.sel.is_collapsed(), "an editing double-tap selects a word");
+    assert_eq!(h.state().session.view.zoom, rest, "editing never zoomed");
+    let _ = sel;
+}
+
+/// #mobile: a finger held on a word selects it while the page reads, and the grips show for it.
+#[test]
+fn a_long_press_selects_a_word_while_reading() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let at = egui::pos2(195.0, 480.0);
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::Start, pos: at, force: None });
+    h.event(egui::Event::PointerMoved(at));
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(2);
+    // Held past egui's long-press window (0.8 s) without moving.
+    h.run_steps(55);
+    assert!(!h.state().session.sel.is_collapsed(), "the held finger selected the word");
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::End, pos: at, force: None });
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    assert!(!h.state().session.sel.is_collapsed(), "the selection stays after the lift");
 }
