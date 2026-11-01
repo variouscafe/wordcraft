@@ -67,9 +67,13 @@ impl WordApp {
                 if moved(self) {
                     return;
                 }
-                ribbon::show(self, ui);
-                if moved(self) {
-                    return;
+                // #mobile: a phone page reading as a viewer shows no ribbon — the text gets the
+                // room, and File comes from the title bar's folder. Edit brings it back.
+                if !crate::responsive::touch_reading(self, ctx) {
+                    ribbon::show(self, ui);
+                    if moved(self) {
+                        return;
+                    }
                 }
                 chrome::status_bar(self, ui);
                 panes::show(self, ui);

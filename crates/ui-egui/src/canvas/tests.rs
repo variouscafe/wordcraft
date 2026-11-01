@@ -5101,3 +5101,35 @@ fn the_floating_toolbar_waits_for_editing() {
     }
     assert!(toolbar(&h).is_some(), "a selection while editing shows the toolbar");
 }
+
+/// #mobile: a phone page reading as a viewer shows no ribbon — the text gets the room — and
+/// the title bar's File button opens the File page (New, Open, Recent) in its place. Edit
+/// brings the ribbon back with the keyboard.
+#[test]
+fn a_reading_phone_page_shows_no_ribbon_but_carries_file() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    // Reading: no ribbon tab is drawn, and File is a title-bar button.
+    assert!(h.query_all_by_label("Home").next().is_none(), "the ribbon is away while the page reads");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "File").click();
+    h.run_steps(3);
+    assert!(h.state().ui.backstage, "File opens from the title bar");
+    assert!(h.query_all_by_label("Recent").next().is_some(), "the File page shows Recent");
+    h.state_mut().ui.backstage = false;
+    h.run_steps(2);
+    // Edit brings the ribbon back.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    assert!(h.query_all_by_label("Home").next().is_some(), "Edit shows the ribbon again");
+}
