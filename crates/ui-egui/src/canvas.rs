@@ -160,6 +160,10 @@ pub struct CanvasState {
     /// file name in the window caption can be drawn.
     pub(crate) ime_faces: Vec<std::sync::Arc<wordcraft_fonts::FontFace>>,
     pub want_focus: bool,
+    /// Phone-width reading ([`crate::responsive::touch_reading`]): the page is a viewer, and the
+    /// title bar's Edit button switches it to editing (bringing the keyboard up); Done drops it
+    /// back. Reset for every document — each one opens to read, as Word's phone app opens them.
+    pub phone_editing: bool,
     pub context_issue: Option<serde_json::Value>,
     pub context_synonyms: Option<serde_json::Value>,
     /// The right-click context menu is open (the mini toolbar stands down while it is).
@@ -378,6 +382,7 @@ impl Default for CanvasState {
             ime_preedit_range: None,
             ime_faces: Vec::new(),
             want_focus: true,
+            phone_editing: false,
             context_issue: None,
             context_synonyms: None,
             obj_drag: None,
@@ -792,22 +797,34 @@ fn update_canvas_focus(app: &mut WordApp, ui: &mut Ui, resp: &egui::Response, im
     let pointer_click = resp.clicked_by(egui::PointerButton::Primary);
     let accesskit_click = resp.clicked() && !pointer_click && !keyboard_click;
     let focus_click = pointer_click || accesskit_click || resp.drag_started();
-    if focus_click {
-        ui.memory_mut(|memory| memory.interrupt_ime());
-    }
-    if focus_click || (app.canvas.want_focus && !resp.has_focus()) {
-        resp.request_focus();
-    }
-    if focus_click || app.canvas.want_focus {
+    // Phone-width reading (#mobile): the page is a viewer until the title bar's Edit button
+    // switches it to editing, so a touch never takes the keyboard — the soft keyboard would
+    // cover the text being read. Focus it somehow has (Done was pressed after Edit) is given
+    // up, which also ends any composition and closes the keyboard.
+    let reading = crate::responsive::touch_reading(app, ui.ctx());
+    if reading {
         app.canvas.want_focus = false;
+        if resp.has_focus() {
+            resp.surrender_focus();
+        }
+    } else {
+        if focus_click {
+            ui.memory_mut(|memory| memory.interrupt_ime());
+        }
+        if focus_click || (app.canvas.want_focus && !resp.has_focus()) {
+            resp.request_focus();
+        }
+        if focus_click || app.canvas.want_focus {
+            app.canvas.want_focus = false;
+        }
     }
     app.canvas.widget_id = Some((resp.id, ui.ctx().cumulative_pass_nr()));
-    if resp.has_focus() {
+    if resp.has_focus() && !reading {
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(resp.id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true })
         });
     }
-    app.canvas.focused = resp.has_focus();
+    app.canvas.focused = !reading && resp.has_focus();
     // One observation per viewport pass, after every event and command for the pass has been
     // applied: the owner, generation, bounded surrounding text and change cause all come from
     // this same settled state.

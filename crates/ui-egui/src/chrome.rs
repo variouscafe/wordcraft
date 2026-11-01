@@ -373,6 +373,7 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                         ui.add_space(8.0);
                     }
                     search_box(app, ui, control_h);
+                    edit_toggle(app, ui);
                     right_start = ui.min_rect().min.x;
                 });
             });
@@ -460,6 +461,55 @@ fn search_box(app: &mut WordApp, ui: &mut Ui, control_h: f32) {
     };
     if resp.on_hover_text(tip).clicked() {
         let _ = app.run("tools.search", json!({}));
+    }
+}
+
+/// The phone title bar's Edit/Done button (#mobile): a phone-width page opens as a viewer —
+/// touching it never raises the soft keyboard over the text being read. Edit switches the page
+/// to editing and hands it the keyboard (`CanvasState::want_focus`); Done drops it back to
+/// reading, and the canvas gives the keyboard up.
+fn edit_toggle(app: &mut WordApp, ui: &mut Ui) {
+    if !crate::responsive::is_phone(ui) || !app.has_document() {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    let editing = app.canvas.phone_editing;
+    let label = if editing { tl!("Done") } else { tl!("Edit") };
+    let font = TypeRung::Control.medium();
+    let track = TypeRung::Control.tracking();
+    let color = if editing { t.text } else { t.on_accent };
+    let text_w = text_width(ui.painter(), label, &font, track, color);
+    let (r, resp) = ui.allocate_exact_size(vec2(24.0 + text_w + 12.0, 22.0), Sense::click());
+    if editing {
+        // Editing ends with a quieter outline, the way Word's phone app shows it.
+        ui.painter().rect(
+            r,
+            11.0,
+            if resp.hovered() { t.hover } else { egui::Color32::TRANSPARENT },
+            Stroke::new(1.0, t.border),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        ui.painter().rect(r, 11.0, if resp.hovered() { t.accent_text } else { t.accent }, Stroke::NONE, egui::StrokeKind::Inside);
+        icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 12.0, r.center().y), vec2(14.0, 14.0)), "pencil", t.on_accent, t.on_accent);
+    }
+    paint_text(
+        ui.painter(),
+        pos2(r.min.x + 24.0, r.center().y - TypeRung::Control.line_height() / 2.0),
+        Align2::LEFT_TOP,
+        label,
+        &font,
+        track,
+        color,
+    );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let tip = if editing { tl!("Finish editing") } else { tl!("Edit the document") };
+    if resp.on_hover_text(tip).clicked() {
+        app.canvas.phone_editing = !editing;
+        if !editing {
+            // The keyboard follows the focus next frame; a page not yet drawn must not take it.
+            app.canvas.want_focus = true;
+        }
     }
 }
 
