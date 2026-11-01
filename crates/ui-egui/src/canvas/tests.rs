@@ -4973,3 +4973,131 @@ fn desktop_pages_are_never_viewers() {
     h.run();
     assert!(h.state().canvas.focused, "a desktop click on the page takes the keyboard");
 }
+
+/// #mobile: a finger drag scrolls the page, so it never drag-selects — the selection stays what
+/// it was while the view moves. A mouse drag at the same phone width still selects, and the
+/// floating formatting toolbar waits for Edit: reading never shows it over the text.
+#[test]
+fn a_finger_drag_scrolls_the_page_instead_of_selecting() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let before_scroll = h.state().canvas.scroll_offset.y;
+    // The finger as the browser reports it: a touch event beside every pointer event.
+    let touch = |phase: egui::TouchPhase, pos: egui::Pos2| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase,
+        pos,
+        force: None,
+    };
+    let press = |pos: egui::Pos2, down: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: Default::default(),
+    };
+    let at = egui::pos2(195.0, 500.0);
+    h.event(touch(egui::TouchPhase::Start, at));
+    h.event(egui::Event::PointerMoved(at));
+    h.event(press(at, true));
+    h.run_steps(2);
+    for y in [460.0, 420.0, 380.0, 340.0] {
+        let p = egui::pos2(195.0, y);
+        h.event(touch(egui::TouchPhase::Move, p));
+        h.event(egui::Event::PointerMoved(p));
+        h.run_steps(2);
+    }
+    let end = egui::pos2(195.0, 340.0);
+    h.event(touch(egui::TouchPhase::End, end));
+    h.event(press(end, false));
+    h.run_steps(2);
+    h.run_steps(3);
+    assert!(h.state().canvas.scroll_offset.y > before_scroll, "the finger drag scrolled: {} -> {before_scroll}", h.state().canvas.scroll_offset.y);
+    assert!(h.state().session.sel.is_collapsed(), "the finger drag selected nothing");
+}
+
+/// #mobile: the mouse's drag still selects at phone width — the finger gives up drag-select,
+/// nothing else does.
+#[test]
+fn a_mouse_drag_still_selects_at_phone_width() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let press = |pos: egui::Pos2, down: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: Default::default(),
+    };
+    let at = egui::pos2(195.0, 500.0);
+    h.event(egui::Event::PointerMoved(at));
+    h.event(press(at, true));
+    h.run_steps(2);
+    h.event(egui::Event::PointerMoved(egui::pos2(260.0, 500.0)));
+    h.run_steps(2);
+    h.run_steps(2);
+    h.event(press(egui::pos2(260.0, 500.0), false));
+    h.run_steps(2);
+    assert!(!h.state().session.sel.is_collapsed(), "the mouse drag selected text");
+}
+
+/// #mobile: the floating formatting toolbar is an editing tool. A selection while the page reads
+/// as a viewer (a double-tap to copy) never shows it; Edit does.
+#[test]
+fn the_floating_toolbar_waits_for_editing() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(2);
+    let toolbar = |h: &egui_kittest::Harness<'_, WordApp>| h.ctx.data(|d| d.get_temp::<[Rect; 2]>(crate::mini_toolbar::shown_id()));
+    // A double-tap selects a word; reading never shows the toolbar over it.
+    let at = egui::pos2(195.0, 480.0);
+    for _ in 0..2 {
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run_steps(2);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(2);
+    }
+    assert!(!h.state().session.sel.is_collapsed(), "the double-tap selected a word");
+    assert!(toolbar(&h).is_none(), "the toolbar stays away while the page reads");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    // A press on the chrome (Edit itself) puts the bar away for that selection, as it always
+    // did; a fresh selection while editing brings it over the text.
+    let other = egui::pos2(120.0, 480.0);
+    for _ in 0..2 {
+        h.event(egui::Event::PointerMoved(other));
+        h.event(egui::Event::PointerButton { pos: other, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run_steps(2);
+        h.event(egui::Event::PointerButton { pos: other, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(2);
+    }
+    assert!(toolbar(&h).is_some(), "a selection while editing shows the toolbar");
+}

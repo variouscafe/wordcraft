@@ -1075,13 +1075,17 @@ fn paint_read_aloud_highlight(
     }
 }
 
-fn canvas_response(ui: &mut Ui, content: Rect, scroll_target: Option<Rect>) -> egui::Response {
+fn canvas_response(ui: &mut Ui, content: Rect, scroll_target: Option<Rect>, finger: bool) -> egui::Response {
     // A fixed id: an automatic one follows how many widgets came before, which Read Mode's
     // chrome changes, and a new id dropped the keyboard focus, so the arrows, Page Up/Down
     // and Escape did nothing in Read Mode until the reader clicked a page (#1772).
     // It also keeps the focus when Focus hides the rulers (#1678).
+    // A finger drag scrolls the page (the scroll area's touch drag-scroll takes the gesture),
+    // so while a finger is down the canvas senses no drag: the mouse's drag selects text,
+    // and touch selection is the double-tap and the grips (#mobile).
     ui.advance_cursor_after_rect(content);
-    let response = ui.interact(content, egui::Id::unique("wordcraft_canvas"), Sense::click_and_drag());
+    let sense = if finger { Sense::CLICK } else { Sense::click_and_drag() };
+    let response = ui.interact(content, egui::Id::unique("wordcraft_canvas"), sense);
     if let Some(target) = scroll_target {
         ui.scroll_to_rect(Rect::from_min_size(ui.min_rect().min + target.min.to_vec2(), target.size()), None);
     }
@@ -1293,8 +1297,11 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
         rulers(app, ui, h, v, &rects, layout, geo.scale);
     }
     crate::mini_toolbar::track_dismissal(app, ui.ctx(), area);
+    // #mobile: the floating toolbar is an editing tool. A phone page reads as a viewer until
+    // Edit is pressed, and a selection there (a double-tap to copy) is not a formatting ask.
     if let Some(sel) = app.canvas.mini_anchor
         && app.ui.mini_toolbar
+        && !crate::responsive::touch_reading(app, ui.ctx())
     {
         crate::mini_toolbar::show(app, ui.ctx(), sel, out.inner_rect);
     }
@@ -1346,7 +1353,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     let out = scroll_area.show_viewport(&mut ui_area, |ui, viewport| {
         origin = ui.min_rect().min - viewport.min.to_vec2();
         let content = Rect::from_min_size(ui.min_rect().min, geo.size);
-        let resp = canvas_response(ui, content, scroll_target);
+        let resp = canvas_response(ui, content, scroll_target, ui.input(|i| i.any_touches()));
         // Read Mode's neighbouring columns end right at the viewport's edges: keep their
         // shadows from showing there as hairlines.
         let clip = if app.session.view.read_mode { ui.clip_rect().shrink2(vec2(3.0, 0.0)) } else { ui.clip_rect() };

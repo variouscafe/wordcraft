@@ -110,7 +110,7 @@ pub(super) fn mouse(app: &mut WordApp, ui: &Ui, resp: &egui::Response, rects: &[
     };
     let Some((page, x, y)) = page_at(rects, layout, scale, p) else { return };
     let story = app.session.sel.focus.story;
-    handle_page_pointer(app, PagePointer { ui, resp, layout, p, page, x, y, story });
+    handle_page_pointer(app, PagePointer { ui, resp, layout, p, page, x, y, story, finger: ui.input(|i| i.any_touches()) });
 }
 
 fn route_pointer_targets(app: &mut WordApp, ui: &Ui, resp: &egui::Response, rects: &[Rect], layout: &DocLayout, scale: f32) -> Option<Pos2> {
@@ -148,6 +148,9 @@ struct PagePointer<'a> {
     x: f32,
     y: f32,
     story: StoryRef,
+    /// A finger is down (a touch screen, not the mouse): its drag scrolls the page, so it
+    /// never drag-selects — touch selection is the double-tap and the grips (#mobile).
+    finger: bool,
 }
 
 fn handle_page_pointer(app: &mut WordApp, pointer: PagePointer<'_>) {
@@ -234,7 +237,7 @@ fn handle_primary_press(
     hf_zone: Option<(Option<StoryRef>, bool)>,
     hf_enter: bool,
 ) {
-    let PagePointer { ui, layout, p, page, x, y, story, .. } = *pointer;
+    let PagePointer { ui, layout, p, page, x, y, story, finger, .. } = *pointer;
     let now = ui.input(|i| i.time);
     let (delay, dist) = ui.ctx().options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
     let clicks = press_count(app.canvas.last_press, now, p, delay, dist);
@@ -321,7 +324,9 @@ fn handle_primary_press(
             (unit, start, end)
         };
         app.canvas.unit_drag = Some(UnitDrag { unit, clicks, start, end, last: line });
-        app.canvas.dragging = true;
+        if !finger {
+            app.canvas.dragging = true;
+        }
         return;
     }
     let Some(pos) = layout.hit(page, x, y, story) else { return };
@@ -367,7 +372,9 @@ fn handle_primary_press(
         app.canvas.unit_drag = Some(UnitDrag { unit, clicks, start, end, last: pos });
     }
     app.session.page_hint = page;
-    app.canvas.dragging = true;
+    if !finger {
+        app.canvas.dragging = true;
+    }
     // Format painter applies on mouse up
 }
 
