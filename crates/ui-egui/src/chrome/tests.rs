@@ -119,6 +119,56 @@ fn a_long_status_message_stops_before_the_controls() {
     assert!(f64::from(msg.rect.right()) <= focus.x0, "the message stops before the Focus button: {:?} vs {}", msg.rect, focus.x0);
 }
 
+/// Phone width (below the shared breakpoint, crate::responsive): the bar sheds its desktop-only
+/// controls — the zoom slider, the Focus button and the proofing language — so the right-side
+/// controls no longer run under the page and word count on the left (a 390 pt bar is 26 pt tall
+/// and the slider alone is 110 pt wide). Page, word count and the zoom/view controls stay.
+#[test]
+fn phone_status_bar_sheds_its_desktop_controls() {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+    let ctx = ctx();
+    ctx.enable_accesskit();
+    let input =
+        egui::RawInput { time: Some(0.0), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(390.0, 844.0))), ..Default::default() };
+    let mut out = ctx.run_ui(input, |ui| status_bar(&mut a, ui));
+    out.textures_delta.clear();
+    let update = out.platform_output.accesskit_update.take().unwrap();
+    let labels = update.nodes.iter().filter_map(|(_, node)| node.label().map(str::to_string)).collect::<Vec<_>>();
+    assert!(!labels.iter().any(|l| l == "Focus"), "Focus is desktop chrome: {labels:?}");
+    assert!(!labels.iter().any(|l| l == "Zoom" || l == "Text Size"), "the zoom slider is desktop chrome: {labels:?}");
+    assert!(!labels.iter().any(|l| l.starts_with("English")), "the proofing language is desktop chrome: {labels:?}");
+    let bounds = |prefix: &str| {
+        update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label().is_some_and(|l| l.starts_with(prefix)))
+            .and_then(|(_, n)| n.bounds())
+            .unwrap_or_else(|| panic!("{prefix} is drawn"))
+    };
+    assert!(bounds("Page ").x1 <= bounds("Read Mode").x0, "the left items stop before the view controls");
+    for kept in ["Zoom In", "Zoom Out", "Print Layout", "Web Layout", "Read Mode"] {
+        assert!(labels.iter().any(|l| l == kept), "{kept} stays at phone width: {labels:?}");
+    }
+}
+
+/// ≥760 pt is desktop: every control stays, including the three the phone bar sheds.
+#[test]
+fn desktop_status_bar_keeps_its_controls_at_760() {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+    let ctx = ctx();
+    ctx.enable_accesskit();
+    let input =
+        egui::RawInput { time: Some(0.0), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(760.0, 900.0))), ..Default::default() };
+    let mut out = ctx.run_ui(input, |ui| status_bar(&mut a, ui));
+    out.textures_delta.clear();
+    let update = out.platform_output.accesskit_update.take().unwrap();
+    let labels = update.nodes.iter().filter_map(|(_, node)| node.label().map(str::to_string)).collect::<Vec<_>>();
+    for kept in ["Focus", "Zoom", "Zoom In", "Zoom Out", "Print Layout", "Web Layout", "Read Mode"] {
+        assert!(labels.iter().any(|l| l == kept), "{kept} stays at 760 pt: {labels:?}");
+    }
+    assert!(labels.iter().any(|l| l.starts_with("English")), "the proofing language stays at 760 pt: {labels:?}");
+}
+
 /// The status bar's "editing a non-body story" line named every one of them "Editing
 /// header/footer", footnotes and endnotes included — it only ever checked "not the body,
 /// not a text box", with no regard for which kind of part it actually was.
