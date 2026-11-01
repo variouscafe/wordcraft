@@ -132,6 +132,12 @@ lives only on the `local/main` branch (see below); it is never PR'd upstream.
 - **Never push `local/main` to `origin`.** It is backed up on the fork
   `https://github.com/variouscafe/wordcraft` (remote `fork`): after every rebase,
   `git push -f fork local/main` — force-push is allowed there and nowhere else.
+- **Deploying the web app: Cloudflare Pages, never GitHub Pages.** The deployment is the
+  existing Cloudflare Pages project `wordcraft-web` (**word.suseona.com**,
+  `wordcraft-web-3gz.pages.dev`), driven by `packaging/deploy-web.sh` — Trunk release build,
+  the wasm shipped gzip-compressed (`.wasm.bin` + a DecompressionStream loader) because Pages
+  caps assets at 25 MiB and the raw wasm is ~45 MB, then `wrangler pages deploy`. `--skip-build`
+  reuses `dist/web`. (The fork's `gh-pages` branch is only a redirect to word.suseona.com.)
 - **A change that belongs upstream goes by PR from a branch off `main`, pushed to `fork`
   (`git switch -c <name> main` … `git push -u fork <name>`, then
   `gh pr create -R storytold/wordcraft`), never from `local/main`.** Once upstream merges it,
