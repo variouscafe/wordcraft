@@ -5027,6 +5027,13 @@ fn a_finger_drag_scrolls_the_page_instead_of_selecting() {
 
 /// #mobile: the mouse's drag still selects at phone width — the finger gives up drag-select,
 /// nothing else does.
+/// A screen point on the body text `pos` (a document position), where a tap lands on words
+/// however the page is fitted.
+fn body_point(h: &mut egui_kittest::Harness<'_, WordApp>, pos: wordcraft_doc::Pos) -> egui::Pos2 {
+    let c = h.state_mut().session.layout().caret(&pos).expect("a caret in the body");
+    crate::canvas::page_to_screen(h.state_mut(), c.page, c.x + 1.0, c.top + c.height / 2.0).expect("on screen")
+}
+
 #[test]
 fn a_mouse_drag_still_selects_at_phone_width() {
     let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
@@ -5046,14 +5053,15 @@ fn a_mouse_drag_still_selects_at_phone_width() {
         pressed: down,
         modifiers: Default::default(),
     };
-    let at = egui::pos2(195.0, 500.0);
+    let at = body_point(&mut h, wordcraft_doc::Pos::body(2, 5));
+    let to = body_point(&mut h, wordcraft_doc::Pos::body(4, 5));
     h.event(egui::Event::PointerMoved(at));
     h.event(press(at, true));
     h.run_steps(2);
-    h.event(egui::Event::PointerMoved(egui::pos2(260.0, 500.0)));
+    h.event(egui::Event::PointerMoved(to));
     h.run_steps(2);
     h.run_steps(2);
-    h.event(press(egui::pos2(260.0, 500.0), false));
+    h.event(press(to, false));
     h.run_steps(2);
     assert!(!h.state().session.sel.is_collapsed(), "the mouse drag selected text");
 }
@@ -5087,7 +5095,7 @@ fn the_floating_toolbar_waits_for_editing() {
     // A press on the chrome (Edit itself) puts the bar away for that selection, as it always
     // did; a fresh selection while editing brings it over the text. A double-tap selects the
     // word there, the editing page's way.
-    let other = egui::pos2(120.0, 480.0);
+    let other = body_point(&mut h, wordcraft_doc::Pos::body(3, 5));
     for _ in 0..2 {
         h.event(egui::Event::PointerMoved(other));
         h.event(egui::Event::PointerButton { pos: other, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
@@ -5215,7 +5223,7 @@ fn a_long_press_selects_a_word_while_reading() {
         app,
     );
     h.run_steps(4);
-    let at = egui::pos2(195.0, 480.0);
+    let at = body_point(&mut h, wordcraft_doc::Pos::body(2, 5));
     h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::Start, pos: at, force: None });
     h.event(egui::Event::PointerMoved(at));
     h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
@@ -5227,4 +5235,43 @@ fn a_long_press_selects_a_word_while_reading() {
     h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     h.run_steps(2);
     assert!(!h.state().session.sel.is_collapsed(), "the selection stays after the lift");
+}
+
+/// #mobile: a phone opens a document fitted to the page's width — the whole page across the
+/// screen, the reading size a double-tap away — while a desktop window opens at 100%, as it
+/// always did.
+#[test]
+fn a_phone_opens_a_document_fitted_to_the_page_width() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(6);
+    let zoom = h.state().session.view.zoom;
+    assert!(zoom < 0.9, "the page opened fitted to the width: {zoom}");
+    assert!(!h.state().canvas.phone_fit_pending, "the fit happened once");
+    // The double-tap's zoom-in is a reading size from there.
+    let pw = h.state_mut().session.layout().pages.first().map(|p| p.w).unwrap_or(612.0);
+    let vw = h.state().canvas.viewport.map(|r| r.width()).unwrap_or(390.0);
+    let fit = (vw - 56.0) / pw / (96.0 / 72.0);
+    assert!((zoom - fit).abs() < 0.02, "the fit zoom: {zoom} vs {fit}");
+    // A desktop window opens at 100%, never fitted.
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(6);
+    assert_eq!(h.state().session.view.zoom, 1.0, "the desktop opens at 100%");
 }
