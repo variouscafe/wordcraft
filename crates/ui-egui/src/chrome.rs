@@ -303,6 +303,19 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
             let mut right_start = full.max.x;
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                // #mobile: while a phone page reads as a viewer the ribbon (with its File tab) is
+                // away, so the title bar carries File — New, Open and Recent live behind it.
+                if app.has_document() && crate::responsive::touch_reading(app, ui.ctx()) {
+                    let (r, resp) = ui.allocate_exact_size(vec2(26.0, 24.0), Sense::click());
+                    if resp.hovered() {
+                        ui.painter().rect_filled(r, 4.0, t.hover);
+                    }
+                    icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(16.0, 16.0)), "folder", t.icon, t.accent);
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("File")));
+                    if resp.on_hover_text(tl!("File")).clicked() {
+                        let _ = app.run("ui.backstage", json!({"value": true, "page": "home"}));
+                    }
+                }
                 // AutoSave switch: greyed out, with the reason as its tooltip, when AutoSave can't
                 // cover the document (#196, #176); clicking it then offers Save As where that helps.
                 let block = app.autosave_block();
