@@ -92,6 +92,12 @@ lives only on the `local/main` branch (see below); it is never PR'd upstream.
   so desktop (`>= ~760 pt`) renders exactly as before. Never break wasm (`cargo xtask wasm`);
   pin narrow-viewport behaviour with `egui_kittest` tests at phone sizes, like `ribbon_fit`'s
   tests do for the ribbon.
+- **Deploying the web app: Cloudflare Pages, never GitHub Pages.** The deployment is the
+  existing Cloudflare Pages project `wordcraft-web` (**word.suseona.com**,
+  `wordcraft-web-3gz.pages.dev`), driven by `packaging/deploy-web.sh` — Trunk release build,
+  the wasm shipped gzip-compressed (`.wasm.bin` + a DecompressionStream loader) because Pages
+  caps assets at 25 MiB and the raw wasm is ~45 MB, then `wrangler pages deploy`. `--skip-build`
+  reuses `dist/web`. (The fork's `gh-pages` branch is only a redirect to word.suseona.com.)
 - When a rebase conflicts in this file, keep upstream's sections and keep this one.
 
 ## Roadmap
