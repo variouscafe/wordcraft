@@ -4895,3 +4895,80 @@ fn touch_grips_adjust_the_selection() {
     assert!(after != before, "the end grip moved the selection's end: {before:?} -> {after:?}");
     assert_eq!(h.state().session.sel.ordered().0, h.state().session.sel.ordered().0, "the start stays");
 }
+
+/// #mobile: a phone-width page opens as a viewer. Touching it never focuses it — the soft
+/// keyboard would cover the text being read — so typing on it changes nothing; the title bar's
+/// Edit button switches the page to editing (the keyboard follows the focus), and Done drops it
+/// back to reading. A desktop-width click still focuses the page as always.
+#[test]
+fn phone_pages_read_until_edit_is_pressed() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run();
+    let tap = |h: &mut egui_kittest::Harness<'_, WordApp>, pos: egui::Pos2| {
+        h.event(egui::Event::PointerMoved(pos));
+        h.run();
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run();
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run();
+    };
+    // Reading: a tap on the page neither focuses it nor lets a keystroke through.
+    tap(&mut h, egui::pos2(195.0, 500.0));
+    assert!(!h.state().canvas.focused, "a touch on the reading page takes no keyboard");
+    let rev = h.state().session.rev();
+    h.event(egui::Event::Text("q".into()));
+    h.run();
+    assert_eq!(h.state().session.rev(), rev, "typing on the reading page edits nothing");
+    // Edit: the page takes the keyboard and typing works.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    assert!(h.state().canvas.focused, "Edit hands the keyboard to the page");
+    let rev = h.state().session.rev();
+    h.event(egui::Event::Text("q".into()));
+    h.run();
+    assert!(h.state().session.rev() > rev, "typing on the editing page edits the document");
+    // Done: back to reading, the keyboard goes down again.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Done").click();
+    h.run_steps(3);
+    assert!(!h.state().canvas.focused, "Done takes the keyboard back off the page");
+    let rev = h.state().session.rev();
+    h.event(egui::Event::Text("q".into()));
+    h.run();
+    assert_eq!(h.state().session.rev(), rev, "after Done, typing edits nothing again");
+}
+
+/// The viewer is a phone-width behaviour alone (#mobile): a desktop window's page takes the
+/// keyboard on the first click, as it always has.
+#[test]
+fn desktop_pages_are_never_viewers() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run();
+    let pos = h.state().canvas.viewport.expect("the page is drawn").center();
+    h.event(egui::Event::PointerMoved(pos));
+    h.run();
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run();
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run();
+    assert!(h.state().canvas.focused, "a desktop click on the page takes the keyboard");
+}

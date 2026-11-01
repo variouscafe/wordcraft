@@ -110,6 +110,11 @@ impl WordApp {
         if self.file_browser.open.is_some() {
             return;
         }
+        // Phone-width reading (#mobile): the page is a viewer, so a click on the chrome must not
+        // hand the keyboard to it — the soft keyboard would cover the text being read.
+        if crate::responsive::touch_reading(self, ctx) {
+            return;
+        }
         let Some(pos) = ctx.input(|i| if i.pointer.any_click() { i.pointer.interact_pos() } else { None }) else { return };
         // The ribbon dropped over the page in Focus (#1678) is chrome, though it lies over the page.
         let on_focus_ribbon = self.focus_ribbon && ctx.layer_id_at(pos).is_some_and(|l| l.id == egui::Id::unique("focus_ribbon"));
