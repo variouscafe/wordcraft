@@ -1,8 +1,9 @@
 use super::balloons::over_balloon;
+use super::geometry::sane_dim;
 use super::links::{field_showing_code, is_followable_link, is_generated_bookmark_link, link_under};
 use super::navigation::page_at;
 use super::story::{enters_header_footer, in_text_box, part_kind, text_box_host};
-use super::{CanvasState, DocLayout, PartKind, Pos, Pos2, Rect, StoryRef, Ui, WordApp, json};
+use super::{CanvasState, DocLayout, GAP, PX_PER_PT, PartKind, Pos, Pos2, Rect, StoryRef, Ui, WordApp, json};
 
 /// Drag-select auto-scroll (#688): the pointer within this many points of the viewport's edge
 /// starts scrolling, like Word.
@@ -154,8 +155,14 @@ struct PagePointer<'a> {
 }
 
 fn handle_page_pointer(app: &mut WordApp, pointer: PagePointer<'_>) {
-    let PagePointer { ui, resp, layout, p, page, x, y, story, .. } = pointer;
+    let PagePointer { ui, resp, layout, p, page, x, y, story, finger, .. } = pointer;
     let mods = ui.input(|i| i.modifiers);
+    // #mobile: a finger held on a word selects it — the viewer's way, where the mouse and the
+    // editing page keep the double-click. The grips then adjust it by finger.
+    if finger && resp.long_touched() && crate::responsive::touch_reading(app, ui.ctx()) {
+        let _ = app.run("select.word", json!({}));
+        return;
+    }
     if skip_equation_or_outline(app, &pointer) {
         return;
     }
@@ -243,6 +250,12 @@ fn handle_primary_press(
     let clicks = press_count(app.canvas.last_press, now, p, delay, dist);
     app.canvas.last_press = Some((now, p, clicks));
     app.canvas.unit_drag = None;
+    // #mobile: the viewer's double-tap zooms the page about the finger and back; the mouse's
+    // double-click still selects the word, and so does a double-tap while editing.
+    if finger && clicks == 2 && crate::responsive::touch_reading(app, ui.ctx()) {
+        zoom_about_tap(app, pointer);
+        return;
+    }
     if clicks <= 1 {
         app.canvas.hf_press_switched = false;
     }
@@ -504,4 +517,34 @@ fn show_hover_link(app: &WordApp, pointer: &PagePointer<'_>) {
             ui.label(tip);
         });
     }
+}
+
+/// #mobile: toggle the viewer's zoom about the finger: in to twice the page's fit (the text at
+/// a reading size), back to the zoom the page had. The tapped place stays under the finger as
+/// well as the geometry can promise before it is laid out again.
+fn zoom_about_tap(app: &mut WordApp, pointer: &PagePointer<'_>) {
+    let PagePointer { layout, p, page, x, y, .. } = *pointer;
+    let (Some(pw), Some(ph)) = (layout.pages.get(page).map(|g| sane_dim(g.w, 1e5)), layout.pages.get(page).map(|g| sane_dim(g.h, 2e4))) else {
+        return;
+    };
+    let Some(viewport) = app.canvas.viewport else { return };
+    // The zoom to zoom into: a reading size — twice the page-width fit (the canvas's own Page
+    // Width arithmetic, as a zoom rather than the scale it computes), or half as much again as
+    // the page already sits at, whichever reads larger. A phone page opens wider than the
+    // screen, so the fit alone can sit below where the page already is.
+    let fit = ((viewport.width() - 2.0 * GAP - 20.0) / pw / PX_PER_PT).clamp(0.05, 5.0);
+    let (into, restore) = match app.canvas.phone_zoom_out {
+        Some(z) => (z, None),
+        None => ((fit * 2.0).max(app.session.view.zoom * 1.5).clamp(0.2, 5.0), Some(app.session.view.zoom)),
+    };
+    app.canvas.phone_zoom_out = restore;
+    let _ = app.run("view.zoom", json!({"value": (into * 100.0).round() as u64}));
+    // Keep the tapped place about the finger: the page centres across the content and stacks
+    // down it, so its new place can be written from the tap's place in the page.
+    let s2 = into * PX_PER_PT;
+    let rel = p - viewport.min.to_vec2();
+    let content_w2 = (pw * s2 + 2.0 * GAP).max(viewport.width());
+    let x2 = content_w2 / 2.0 + (x - pw / 2.0) * s2;
+    let y2 = GAP + page as f32 * (ph * s2 + GAP) + y * s2;
+    app.canvas.scroll_request = Some(egui::vec2((x2 - rel.x).max(0.0), (y2 - rel.y).max(0.0)));
 }

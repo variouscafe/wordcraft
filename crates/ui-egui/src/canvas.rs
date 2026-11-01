@@ -164,6 +164,9 @@ pub struct CanvasState {
     /// title bar's Edit button switches it to editing (bringing the keyboard up); Done drops it
     /// back. Reset for every document — each one opens to read, as Word's phone app opens them.
     pub phone_editing: bool,
+    /// The zoom a phone viewer's double-tap zoomed away from, to restore on the next double-tap.
+    /// `None` while the page sits at its own zoom. Reset with every document.
+    pub phone_zoom_out: Option<f32>,
     pub context_issue: Option<serde_json::Value>,
     pub context_synonyms: Option<serde_json::Value>,
     /// The right-click context menu is open (the mini toolbar stands down while it is).
@@ -383,6 +386,7 @@ impl Default for CanvasState {
             ime_faces: Vec::new(),
             want_focus: true,
             phone_editing: false,
+            phone_zoom_out: None,
             context_issue: None,
             context_synonyms: None,
             obj_drag: None,
