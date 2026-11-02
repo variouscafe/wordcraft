@@ -23,3 +23,12 @@ pub fn is_phone_ctx(ctx: &egui::Context) -> bool {
 pub fn touch_reading(app: &crate::WordApp, ctx: &egui::Context) -> bool {
     is_phone_ctx(ctx) && !app.canvas.phone_editing
 }
+
+/// The reading page colour in effect on the surface shown (`view.readPageColor`, Read Mode's
+/// own › View › Page Color): Read Mode's columns always take it, and so does the phone's page
+/// — a Print-mode page read like a book, viewer or editor (#mobile). A desktop window's Print
+/// page never does; that one keeps Word's Switch Modes.
+pub fn reading_page_color(app: &crate::WordApp, ctx: &egui::Context) -> wordcraft_engine::cmd::view::ReadPageColor {
+    let v = &app.session.view;
+    if v.read_mode || is_phone_ctx(ctx) { v.read_page_color } else { wordcraft_engine::cmd::view::ReadPageColor::None }
+}

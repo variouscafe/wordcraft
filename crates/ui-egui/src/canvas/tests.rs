@@ -5370,12 +5370,14 @@ fn a_phone_opens_a_document_fitted_to_the_page_width() {
     assert_eq!(h.state().session.view.zoom, 1.0, "the desktop opens at 100%");
 }
 
-/// #mobile: the status bar's moon switches the page dark for night reading (View › Switch
-/// Modes) and back, with the page itself re-rendered dark; a desktop window's status bar has
-/// no moon (its ribbon owns Switch Modes).
+/// #mobile: the reader's page colour cycles in the status bar — light, sepia, dark — and the
+/// page follows: sepia tints the raster's paper, dark re-renders it dark (Read Mode's › View ›
+/// Page Color, honoured by the phone's page, viewer or editor). A desktop window's status bar
+/// carries no such button, and its Print page never takes the reading colour at all.
 #[test]
-fn the_phone_viewer_switches_to_a_dark_page() {
+fn the_phone_viewer_cycles_its_page_color() {
     use egui_kittest::kittest::Queryable;
+    use wordcraft_engine::cmd::view::ReadPageColor;
 
     let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
     app.ui.language = "en".into();
@@ -5388,17 +5390,39 @@ fn the_phone_viewer_switches_to_a_dark_page() {
         app,
     );
     h.run_steps(4);
-    assert!(!h.state().session.view.dark_mode, "the page starts light");
+    assert_eq!(h.state().session.view.read_page_color, ReadPageColor::None, "the page starts light");
+    let opts = |h: &egui_kittest::Harness<'_, WordApp>| {
+        let a = h.state();
+        page_render_options(a, false)
+    };
+    // Light -> sepia: the raster's paper turns sepia, the text keeps its colours.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Light page").click();
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.read_page_color, ReadPageColor::Sepia);
+    assert_eq!(opts(&h).read_paper, Some(wordcraft_render::SEPIA_PAPER));
+    assert!(!opts(&h).dark, "sepia keeps the text's colors");
+    // Sepia -> dark: the page renders dark.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Sepia page").click();
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.read_page_color, ReadPageColor::Inverse);
+    assert!(opts(&h).dark, "the page re-renders dark");
+    // Dark -> light again.
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Dark page").click();
     h.run_steps(4);
-    assert!(h.state().session.view.dark_mode, "the moon switched the page dark");
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Dark page").click();
+    assert_eq!(h.state().session.view.read_page_color, ReadPageColor::None);
+    assert_eq!(opts(&h).read_paper, None);
+    assert!(!opts(&h).dark, "back on white");
+    // The colour survives Edit and Done: it is the reader's page, whichever mode it is in.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Light page").click();
     h.run_steps(4);
-    assert!(!h.state().session.view.dark_mode, "and back to light");
-    // The desktop's status bar carries no moon.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    assert_eq!(opts(&h).read_paper, Some(wordcraft_render::SEPIA_PAPER), "editing keeps the sepia page");
+    // The desktop's status bar carries no such button, and its Print page never takes the
+    // reading colour: that one keeps Word's Switch Modes.
     let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
     app.ui.language = "en".into();
-    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
         |ui, app: &mut WordApp| {
             let ctx = ui.ctx().clone();
             app.logic(&ctx);
@@ -5407,7 +5431,12 @@ fn the_phone_viewer_switches_to_a_dark_page() {
         app,
     );
     h.run_steps(4);
-    assert!(h.query_all_by_label("Dark page").next().is_none(), "the desktop status bar has no moon");
+    assert!(h.query_all_by_label("Light page").next().is_none(), "the desktop status bar has no page color button");
+    h.state_mut().session.run("view.readPageColor", &serde_json::json!({"value": "sepia"})).unwrap();
+    h.run_steps(4);
+    let o = page_render_options(h.state(), false);
+    assert_eq!(o.read_paper, None, "a desktop Print page never takes the reading colour");
+    assert!(!o.dark);
 }
 
 /// #mobile: a swipe is no tap. Two swipes in a row — the way a page is scrolled — land within

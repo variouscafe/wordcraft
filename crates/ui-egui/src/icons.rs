@@ -1279,6 +1279,20 @@ fn paint_view_and_tables(pen: &Pen, name: &str) -> bool {
         // A triangle filling most of its box: it is drawn at 9–12 pt beside combos and split
         // buttons, where a smaller one shrank to a dot (#535).
         "dropdown" => pen.fill(&[(3.0, 7.0), (17.0, 7.0), (10.0, 14.0)], c),
+        "sun" => {
+            // A disc with eight rays: the page back on white.
+            pen.fcircle(10.0, 10.0, 3.2, c);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                let (dx, dy) = (a.cos(), a.sin());
+                pen.line(&[(10.0 + dx * 5.0, 10.0 + dy * 5.0), (10.0 + dx * 7.3, 10.0 + dy * 7.3)]);
+            }
+        }
+        "pageSepia" => {
+            // A page tinted to its lower half: the reading page in sepia.
+            pen.frect(6.4, 10.0, 13.6, 16.6, a);
+            pen.rect(6.0, 3.0, 14.0, 17.0, c);
+        }
         "moon" => {
             // A crescent: the outer arc of one circle and the bite of another, opening high-right.
             pen.fill(
