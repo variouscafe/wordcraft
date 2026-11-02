@@ -175,6 +175,10 @@ pub struct CanvasState {
     /// #mobile: a drag-scroll underway on the page: the finger pressed on it, or the fling it
     /// left behind at lift (see [`viewer_drag_scroll`]). Reset for every document.
     pub(crate) phone_drag: Option<PhoneDrag>,
+    /// The reading page colour in effect on the page shown this frame (stamped by
+    /// [`prepare_view`]; see [`crate::responsive::reading_page_color`]). `None` wherever the
+    /// surface isn't read on — every desktop Print page.
+    pub(crate) paper: wordcraft_engine::cmd::view::ReadPageColor,
     pub context_issue: Option<serde_json::Value>,
     pub context_synonyms: Option<serde_json::Value>,
     /// The right-click context menu is open (the mini toolbar stands down while it is).
@@ -419,6 +423,7 @@ impl Default for CanvasState {
             phone_zoom_out: None,
             phone_fit_pending: true,
             phone_drag: None,
+            paper: wordcraft_engine::cmd::view::ReadPageColor::None,
             context_issue: None,
             context_synonyms: None,
             obj_drag: None,
@@ -542,8 +547,14 @@ struct CanvasView {
 
 fn prepare_view(app: &mut WordApp, ui: &Ui, full: Rect, layout: &DocLayout) -> CanvasView {
     let read_mode = app.session.view.read_mode;
+    // The reading page colour follows the reader (#mobile): Read Mode's own columns, and the
+    // phone's page — a Print-mode page read like a book. A desktop Print page keeps Word's
+    // Switch Modes. Stamped on the canvas first, so the page rasters and the egui paper below
+    // draw the colour it picks.
+    app.canvas.paper = crate::responsive::reading_page_color(app, ui.ctx());
     // The paper under each page, as the page raster draws it without a page color: the dark page
-    // of View › Switch Modes, or in Read Mode the Page color's white, sepia or dark paper.
+    // of View › Switch Modes, or in Read Mode the Page color's white, sepia or dark paper — and
+    // the phone's reading colour, which the stamp above carries into the render options.
     let paper = {
         let p = page_render_options(app, false).blank_paper();
         Color32::from_rgb(p.0, p.1, p.2)
