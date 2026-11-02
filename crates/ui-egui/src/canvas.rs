@@ -698,7 +698,14 @@ fn configure_scroll_area(app: &mut WordApp, ui: &Ui, view: &CanvasView, motion: 
         .auto_shrink([false, false])
         // Bringing the caret into view glides there, or jumps with animation effects off.
         .animated(view.animate)
-        .scroll_source(egui::scroll_area::ScrollSource { mouse_wheel: false, ..Default::default() });
+        .scroll_source(if crate::responsive::is_phone(ui) {
+            // #mobile: a finger drag scrolls through `viewer_drag_scroll` below — the page
+            // follows the finger 1:1 — so egui's own drag-scroll stands down at phone width
+            // (its kinetic gesture misbehaved on phones).
+            egui::scroll_area::ScrollSource { mouse_wheel: false, drag: egui::scroll_area::DragScroll::Never, ..Default::default() }
+        } else {
+            egui::scroll_area::ScrollSource { mouse_wheel: false, ..Default::default() }
+        });
     if app.session.view.read_mode {
         scroll_area = scroll_area.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
     }
@@ -809,6 +816,29 @@ fn update_canvas_scroll_state(
             app.canvas.phone_fit_pending = false;
             let _ = app.run("view.zoom", json!({"value": (z * 100.0).round() as u64}));
         }
+    }
+}
+
+/// #mobile: a finger's drag scrolls the page at phone width, the offset following the finger
+/// 1:1 through `scroll_request` (egui's scroll-area drag-scroll stood down for it — see
+/// [`configure_scroll_area`]). Reading or editing alike: a finger never drag-selects, the mouse
+/// never scrolls this way. Nothing moves while the press could still be a tap.
+fn viewer_drag_scroll(app: &mut WordApp, ui: &Ui, resp: &egui::Response) {
+    if !crate::responsive::is_phone(ui)
+        || !ui.input(|i| i.any_touches())
+        || !resp.contains_pointer()
+        || !ui.input(|i| i.pointer.primary_down() && i.pointer.is_decidedly_dragging())
+    {
+        return;
+    }
+    let d = ui.input(|i| i.pointer.delta());
+    if d == egui::Vec2::ZERO {
+        return;
+    }
+    let after = (app.canvas.scroll_offset - d).clamp(egui::Vec2::ZERO, app.canvas.scroll_max);
+    if after != app.canvas.scroll_offset {
+        app.canvas.scroll_request = Some(after);
+        ui.ctx().request_repaint();
     }
 }
 
@@ -1210,6 +1240,7 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
     // A click on the page leaves the selected comment balloon.
     dismiss_balloon_on_canvas_click(app, ui, &resp);
     update_canvas_focus(app, ui, &resp, ime_geometry, ime_interrupt);
+    viewer_drag_scroll(app, ui, &resp);
     // Screen readers: the document under the canvas, with the caret (#488).
     crate::a11y::expose(app, ui.ctx(), resp.id, layout, &rects, area);
     // The buttons that start or stop middle-click scrolling don't also click the page.
