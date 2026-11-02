@@ -170,6 +170,9 @@ pub struct CanvasState {
     /// #mobile: the page hasn't been fitted to the phone's width yet (a document's first frames
     /// there, and every document not seen before). A window the mouse uses stays untouched.
     pub phone_fit_pending: bool,
+    /// #mobile: a drag-scroll underway on the page: the finger pressed on it, or the fling it
+    /// left behind at lift (see [`viewer_drag_scroll`]). Reset for every document.
+    pub(crate) phone_drag: Option<PhoneDrag>,
     pub context_issue: Option<serde_json::Value>,
     pub context_synonyms: Option<serde_json::Value>,
     /// The right-click context menu is open (the mini toolbar stands down while it is).
@@ -293,6 +296,17 @@ pub struct CanvasState {
 
 type TablePreviewKey = ((usize, usize, u64, u64, wordcraft_engine::Selection), std::sync::Arc<DocLayout>);
 
+/// The two moments of a phone drag-scroll (#mobile).
+pub(crate) enum PhoneDrag {
+    /// The finger is on the page. Its recent positions (seconds, screen point) measure the
+    /// velocity it would leave with: one that slowed to a stop before lifting carries only its
+    /// stillness in the window.
+    Pressed(std::collections::VecDeque<(f64, egui::Vec2)>),
+    /// The finger lifted at this velocity (screen px/s); the page carries it on, friction
+    /// taking some of it back every frame until the page rests.
+    Flung(egui::Vec2),
+}
+
 impl CanvasState {
     /// Another document is shown in the window: everything about the page that was shown (drags,
     /// menus, the input method's composition, a scroll in progress, rendered pages…) starts
@@ -392,6 +406,7 @@ impl Default for CanvasState {
             phone_editing: false,
             phone_zoom_out: None,
             phone_fit_pending: true,
+            phone_drag: None,
             context_issue: None,
             context_synonyms: None,
             obj_drag: None,
@@ -819,27 +834,97 @@ fn update_canvas_scroll_state(
     }
 }
 
+/// #mobile: how much of a finger's history its release velocity is measured over — long enough
+/// that frame granularity averages out, short enough that a deliberate stop before lifting
+/// flings nothing.
+const DRAG_HISTORY_S: f64 = 0.09;
+/// #mobile: a fling's momentum, decaying over this many seconds (an iOS-like drag).
+const FLING_TAU: f32 = 0.4;
+/// #mobile: below this velocity (screen px/s) a flinging page is at rest.
+const FLING_MIN: f32 = 75.0;
+
 /// #mobile: a finger's drag scrolls the page at phone width, the offset following the finger
 /// 1:1 through `scroll_request` (egui's scroll-area drag-scroll stood down for it — see
 /// [`configure_scroll_area`]). Reading or editing alike: a finger never drag-selects, the mouse
-/// never scrolls this way. Nothing moves while the press could still be a tap.
+/// never scrolls this way. Nothing moves while the press could still be a tap. When the finger
+/// lifts, the page keeps the velocity it left with for a moment — a flick — giving it back to
+/// friction each frame until it rests; a finger landing anywhere catches a page mid-flight.
 fn viewer_drag_scroll(app: &mut WordApp, ui: &Ui, resp: &egui::Response) {
-    if !crate::responsive::is_phone(ui)
-        || !ui.input(|i| i.any_touches())
-        || !resp.contains_pointer()
-        || !ui.input(|i| i.pointer.primary_down() && i.pointer.is_decidedly_dragging())
-    {
+    if !crate::responsive::is_phone(ui) {
+        app.canvas.phone_drag = None;
         return;
     }
-    let d = ui.input(|i| i.pointer.delta());
-    if d == egui::Vec2::ZERO {
+    // A finger pressed anywhere owns the page: on the canvas it drags it, elsewhere it catches
+    // a fling in flight. The mouse never comes in here — only a touch does.
+    let finger_down = ui.input(|i| i.any_touches() && i.pointer.primary_down());
+    if finger_down {
+        if resp.contains_pointer() && ui.input(|i| i.pointer.is_decidedly_dragging()) {
+            let mut drag = match app.canvas.phone_drag.take() {
+                Some(PhoneDrag::Pressed(hist)) => hist,
+                _ => std::collections::VecDeque::new(),
+            };
+            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                let now = ui.input(|i| i.time);
+                drag.push_back((now, p.to_vec2()));
+                while drag.front().is_some_and(|&(t, _)| now - t > DRAG_HISTORY_S) {
+                    drag.pop_front();
+                }
+            }
+            let d = ui.input(|i| i.pointer.delta());
+            let after = (app.canvas.scroll_offset - d).clamp(egui::Vec2::ZERO, app.canvas.scroll_max);
+            if after != app.canvas.scroll_offset {
+                app.canvas.scroll_request = Some(after);
+                ui.ctx().request_repaint();
+            }
+            app.canvas.phone_drag = Some(PhoneDrag::Pressed(drag));
+        } else {
+            app.canvas.phone_drag = None;
+        }
         return;
     }
-    let after = (app.canvas.scroll_offset - d).clamp(egui::Vec2::ZERO, app.canvas.scroll_max);
-    if after != app.canvas.scroll_offset {
+    // The finger is up. A drag that just ended hands the page its release velocity, and a fling
+    // in flight gives some of its speed to friction each frame until it rests (or a finger
+    // catches it above).
+    let vel = match app.canvas.phone_drag.take() {
+        Some(PhoneDrag::Pressed(hist)) => release_velocity(&hist),
+        Some(PhoneDrag::Flung(vel)) => Some(vel),
+        None => None,
+    };
+    let Some(mut vel) = vel else { return };
+    let dt = ui.input(|i| i.unstable_dt).min(0.1);
+    vel *= (-dt / FLING_TAU).exp();
+    if vel.length() < FLING_MIN {
+        return; // At rest.
+    }
+    let before = app.canvas.scroll_offset;
+    let after = (before - vel * dt).clamp(egui::Vec2::ZERO, app.canvas.scroll_max);
+    if after == before {
+        return; // The page is at its end; the fling dies there.
+    }
+    // An axis pinned at an edge has stopped: it gives its velocity up, the other keeps its own.
+    if (after.x - before.x).abs() < f32::EPSILON {
+        vel.x = 0.0;
+    }
+    if (after.y - before.y).abs() < f32::EPSILON {
+        vel.y = 0.0;
+    }
+    if vel != egui::Vec2::ZERO {
+        app.canvas.phone_drag = Some(PhoneDrag::Flung(vel));
         app.canvas.scroll_request = Some(after);
         ui.ctx().request_repaint();
     }
+}
+
+/// The velocity a finger left the page with (#mobile): the distance it covered over its
+/// history's span. A history that spans less than a third of the window says nothing — the
+/// finger only just landed — and one that slowed to a stop carries only its stillness.
+fn release_velocity(hist: &std::collections::VecDeque<(f64, egui::Vec2)>) -> Option<egui::Vec2> {
+    let ((t0, p0), (t1, p1)) = (hist.front()?, hist.back()?);
+    let span = t1 - t0;
+    if span < DRAG_HISTORY_S / 3.0 {
+        return None;
+    }
+    Some((*p1 - *p0) / span as f32)
 }
 
 fn update_canvas_focus(app: &mut WordApp, ui: &mut Ui, resp: &egui::Response, ime_geometry: Option<(Rect, Rect)>, ime_interrupt: bool) {
