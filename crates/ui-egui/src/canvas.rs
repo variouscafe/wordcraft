@@ -1345,7 +1345,10 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
     if !middle_gesture {
         crate::content_controls::clicks(app, &resp);
     }
-    let secondary_clicked = resp.secondary_clicked() && !middle_gesture;
+    // #mobile: a long-press on the viewer selects the word (canvas/input.rs) and the reader's
+    // bar follows it; the desktop context menu a long touch also summons is an editing
+    // surface's tool, so the viewer never raises it.
+    let secondary_clicked = resp.secondary_clicked() && !middle_gesture && !crate::responsive::touch_reading(app, ui.ctx());
     handle_secondary_selection(app, &resp, &rects, layout, geo, secondary_clicked);
     // Shift+F10 opens the same menu below the caret, for the selection or the word there (#821).
     let from_keys = std::mem::take(&mut app.canvas.context_menu_from_keys);
@@ -1449,11 +1452,11 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
         rulers(app, ui, h, v, &rects, layout, geo.scale);
     }
     crate::mini_toolbar::track_dismissal(app, ui.ctx(), area);
-    // #mobile: the floating toolbar is an editing tool. A phone page reads as a viewer until
-    // Edit is pressed, and a selection there (a double-tap to copy) is not a formatting ask.
+    // The floating toolbar follows the selection (#mobile): the editing page shows the
+    // formatting controls, the viewer the reader's verbs — a long-press selection has a way
+    // to copy.
     if let Some(sel) = app.canvas.mini_anchor
         && app.ui.mini_toolbar
-        && !crate::responsive::touch_reading(app, ui.ctx())
     {
         crate::mini_toolbar::show(app, ui.ctx(), sel, out.inner_rect);
     }

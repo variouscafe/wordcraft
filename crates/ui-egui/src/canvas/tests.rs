@@ -5160,10 +5160,12 @@ fn a_mouse_drag_still_selects_at_phone_width() {
     assert!(!h.state().session.sel.is_collapsed(), "the mouse drag selected text");
 }
 
-/// #mobile: the floating formatting toolbar is an editing tool. A selection while the page reads
-/// as a viewer (a double-tap to copy) never shows it; Edit does.
+/// #mobile: the floating toolbar follows a selection in both of the page's modes. The viewer's
+/// bar carries the reader's verbs — copy, select all — and never the formatting controls; the
+/// editing page keeps Word's two formatting rows. A press on the chrome puts it away for that
+/// selection in either mode, as it always did.
 #[test]
-fn the_floating_toolbar_waits_for_editing() {
+fn the_floating_toolbar_follows_the_page_mode() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
@@ -5178,17 +5180,19 @@ fn the_floating_toolbar_waits_for_editing() {
     );
     h.run_steps(2);
     let toolbar = |h: &egui_kittest::Harness<'_, WordApp>| h.ctx.data(|d| d.get_temp::<[Rect; 2]>(crate::mini_toolbar::shown_id()));
-    // A selection while reading (a long-press to copy); the toolbar never shows over it.
-    // (The double-tap is the viewer's zoom now, so the selection comes as a command would.)
+    // A selection while reading (a long-press is the viewer's way; the selection comes as a
+    // command would): the bar shows the reader's verbs, none of the formatting.
     h.state_mut().session.run("select.text", &serde_json::json!({"text": "Studio"})).unwrap();
     h.run_steps(2);
     assert!(!h.state().session.sel.is_collapsed(), "a selection exists while reading");
-    assert!(toolbar(&h).is_none(), "the toolbar stays away while the page reads");
+    assert!(toolbar(&h).is_some(), "the viewer's bar shows over the selection");
+    assert!(h.query_all_by_label("Copy").next().is_some(), "the viewer's bar offers Copy");
+    assert!(h.query_all_by_label("Bold").next().is_none(), "no formatting while reading");
+    // Edit: the same selection carries the formatting rows instead (the press on the chrome
+    // put the bar away for it, so a fresh one is made).
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
     h.run_steps(3);
-    // A press on the chrome (Edit itself) puts the bar away for that selection, as it always
-    // did; a fresh selection while editing brings it over the text. A double-tap selects the
-    // word there, the editing page's way.
+    assert!(h.query_all_by_label("Copy").next().is_none(), "the press on Edit put the bar away for that selection");
     let other = body_point(&mut h, wordcraft_doc::Pos::body(3, 5));
     for _ in 0..2 {
         h.event(egui::Event::PointerMoved(other));
@@ -5198,6 +5202,41 @@ fn the_floating_toolbar_waits_for_editing() {
         h.run_steps(2);
     }
     assert!(toolbar(&h).is_some(), "a selection while editing shows the toolbar");
+    assert!(h.query_all_by_label("Bold").next().is_some(), "the editing page keeps the formatting rows");
+}
+
+/// #mobile: the viewer's own way to a copy: hold a finger on a word — it selects — and the
+/// reader's bar appears over it; Copy leaves the selection as it was, and the bar follows a
+/// new selection. Done drops the page back to reading and the bar to its reader's verbs.
+#[test]
+fn the_viewer_selects_and_offers_copy() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let at = body_point(&mut h, wordcraft_doc::Pos::body(2, 5));
+    // A hold: press and stay a while.
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::Start, pos: at, force: None });
+    h.event(egui::Event::PointerMoved(at));
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(55);
+    assert!(!h.state().session.sel.is_collapsed(), "the hold selected the word");
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::End, pos: at, force: None });
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let sel = h.state().session.sel.clone();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Copy").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.sel, sel, "copying leaves the selection as it was");
 }
 
 /// #mobile: a phone page reading as a viewer shows no ribbon — the text gets the room — and
