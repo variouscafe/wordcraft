@@ -63,6 +63,7 @@ pub fn start() {
                     font_store::load_all(cc.egui_ctx.clone());
                     // Ask that the browser not evict the kept documents and fonts under pressure.
                     crate::doc_store::persist();
+                    crate::doc_store::load_positions();
                     let inbox: Inbox = Inbox::default();
                     let pasted: Inbox = Inbox::default();
                     if let Err(e) = listen_for_pasted_pictures(pasted.clone(), cc.egui_ctx.clone()) {
@@ -310,6 +311,10 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
         // Documents are kept in the browser's file system so Recent reopens them (#local);
         // a name the browser no longer holds says so on the status bar.
         store_document: Some(Box::new(crate::doc_store::store)),
+        // Where each kept document was last read to (#local): a page and a point on it, so a
+        // visit resumes where the last one left off.
+        store_position: Some(Box::new(|name: &str, page: usize, p: egui::Vec2| crate::doc_store::store_position(name, page, p.x, p.y))),
+        load_position: Some(Box::new(|name: &str| crate::doc_store::load_position(name).map(|(page, x, y)| (page, egui::vec2(x, y))))),
         open_stored_document: Some(Box::new(move |name: &str| {
             let (inbox, ctx, messages) = (doc_inbox.clone(), doc_ctx.clone(), doc_messages.clone());
             let asked = name.to_string();

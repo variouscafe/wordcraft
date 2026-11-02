@@ -5423,6 +5423,80 @@ fn the_viewer_selects_and_offers_copy() {
     assert_eq!(h.state().session.sel, sel, "copying leaves the selection as it was");
 }
 
+/// #mobile: the browser remembers where a document was last read to. Opening it at phone
+/// width resumes there once the page-width fit has settled; the resumed place is written back,
+/// and a scroll on asks for the new place to be kept, throttled.
+#[test]
+fn a_phone_resumes_where_the_document_was_read() {
+    use std::sync::{Arc, Mutex};
+
+    let saved: Arc<Mutex<Vec<(String, usize, egui::Vec2)>>> = Arc::new(Mutex::new(Vec::new()));
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut services = crate::Services::default();
+    let text = "A line of reading.\n".repeat(200);
+    services.inbox = Some(Arc::new(Mutex::new(vec![("Notes.txt".to_string(), text.into_bytes())])));
+    let rec = saved.clone();
+    services.store_position = Some(Box::new(move |name, page, p| rec.lock().unwrap().push((name.to_string(), page, p))));
+    let q = asked.clone();
+    services.load_position = Some(Box::new(move |name| {
+        q.lock().unwrap().push(name.to_string());
+        Some((1, egui::vec2(0.0, 400.0)))
+    }));
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), services);
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(30);
+    let off = h.state().canvas.scroll_offset.y;
+    assert!(off > 300.0, "the page resumed well into the document: {off}");
+    assert!(h.state().canvas.phone_restore.is_none(), "the restore is spent");
+    assert_eq!(asked.lock().unwrap().as_slice(), ["Notes.txt"], "the remembered name was asked for");
+    assert!(saved.lock().unwrap().is_empty(), "the resumed place is already kept: nothing to write");
+    // Reading on: the new place is written back, throttled to every few seconds.
+    flick(&mut h, 500.0, 340.0);
+    h.run_steps(220);
+    let written = saved.lock().unwrap().clone();
+    assert!(!written.is_empty(), "a move asked for the new place to be kept");
+    assert!(written.iter().all(|(n, _, _)| n == "Notes.txt"), "kept under the document's name: {written:?}");
+    assert!(written.iter().any(|(_, p, _)| *p >= 1), "kept where the reading has reached: {written:?}");
+}
+
+/// #mobile: the resume is a phone page's alone. A desktop window opens a document at the top
+/// as it always did, and never asks the browser for a remembered place.
+#[test]
+fn a_desktop_window_opens_at_the_top_as_always() {
+    use std::sync::{Arc, Mutex};
+
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut services = crate::Services::default();
+    let text = "A line of reading.\n".repeat(200);
+    services.inbox = Some(Arc::new(Mutex::new(vec![("Notes.txt".to_string(), text.into_bytes())])));
+    let q = asked.clone();
+    services.load_position = Some(Box::new(move |name| {
+        q.lock().unwrap().push(name.to_string());
+        Some((1, egui::vec2(0.0, 400.0)))
+    }));
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), services);
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(30);
+    assert!(asked.lock().unwrap().is_empty(), "a desktop window asks for no remembered place");
+    assert_eq!(h.state().canvas.scroll_offset.y, 0.0, "the document opens at the top, as always");
+}
+
 /// #mobile: a phone page reading as a viewer shows no ribbon — the text gets the room — and
 /// the title bar's File button opens the File page (New, Open, Recent) in its place. Edit
 /// brings the ribbon back with the keyboard.
