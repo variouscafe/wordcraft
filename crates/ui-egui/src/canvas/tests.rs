@@ -5023,6 +5023,27 @@ fn a_finger_drag_scrolls_the_page_instead_of_selecting() {
     h.run_steps(3);
     assert!(h.state().canvas.scroll_offset.y > before_scroll, "the finger drag scrolled: {} -> {before_scroll}", h.state().canvas.scroll_offset.y);
     assert!(h.state().session.sel.is_collapsed(), "the finger drag selected nothing");
+    // Editing scrolls the same way, keyboard and all.
+    use egui_kittest::kittest::Queryable;
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    let editing_before = h.state().canvas.scroll_offset.y;
+    let at = egui::pos2(195.0, 500.0);
+    h.event(touch(egui::TouchPhase::Start, at));
+    h.event(egui::Event::PointerMoved(at));
+    h.event(press(at, true));
+    h.run_steps(2);
+    for y in [460.0, 420.0, 380.0] {
+        let p = egui::pos2(195.0, y);
+        h.event(touch(egui::TouchPhase::Move, p));
+        h.event(egui::Event::PointerMoved(p));
+        h.run_steps(2);
+    }
+    let end = egui::pos2(195.0, 380.0);
+    h.event(touch(egui::TouchPhase::End, end));
+    h.event(press(end, false));
+    h.run_steps(3);
+    assert!(h.state().canvas.scroll_offset.y > editing_before, "the finger drag scrolls while editing too");
 }
 
 /// #mobile: the mouse's drag still selects at phone width — the finger gives up drag-select,
