@@ -768,6 +768,24 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                             let _ = app.run(id, json!({}));
                         }
                     }
+                    // #mobile: the viewer reads at night — the moon switches the page dark
+                    // (View › Switch Modes). Read Mode keeps its own page colour, so the moon
+                    // stands down there; a desktop window reaches Switch Modes in the ribbon.
+                    if phone && !read {
+                        let on = app.session.view.dark_mode;
+                        let (r, resp) = ui.allocate_exact_size(vec2(22.0, 20.0), Sense::click());
+                        if on {
+                            ui.painter().rect_filled(r, 3.0, t.checked);
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(r, 3.0, t.hover);
+                        }
+                        icons::paint(ui.painter(), r.shrink(3.0), "moon", t.icon, t.accent);
+                        let name = tl!("Dark page");
+                        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, name));
+                        if resp.on_hover_text(name).clicked() {
+                            let _ = app.run("view.darkMode", json!({}));
+                        }
+                    }
                     // The Focus button is the last of the controls, so it is the leftmost one: the
                     // message has to stop before it (#2402). It is desktop chrome; the phone bar
                     // drops it, and the message then stops at whatever control is leftmost.

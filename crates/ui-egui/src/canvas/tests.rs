@@ -5275,3 +5275,43 @@ fn a_phone_opens_a_document_fitted_to_the_page_width() {
     h.run_steps(6);
     assert_eq!(h.state().session.view.zoom, 1.0, "the desktop opens at 100%");
 }
+
+/// #mobile: the status bar's moon switches the page dark for night reading (View › Switch
+/// Modes) and back, with the page itself re-rendered dark; a desktop window's status bar has
+/// no moon (its ribbon owns Switch Modes).
+#[test]
+fn the_phone_viewer_switches_to_a_dark_page() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    assert!(!h.state().session.view.dark_mode, "the page starts light");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Dark page").click();
+    h.run_steps(4);
+    assert!(h.state().session.view.dark_mode, "the moon switched the page dark");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Dark page").click();
+    h.run_steps(4);
+    assert!(!h.state().session.view.dark_mode, "and back to light");
+    // The desktop's status bar carries no moon.
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    assert!(h.query_all_by_label("Dark page").next().is_none(), "the desktop status bar has no moon");
+}
