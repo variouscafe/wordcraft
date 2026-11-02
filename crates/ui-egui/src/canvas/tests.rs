@@ -5046,6 +5046,112 @@ fn a_finger_drag_scrolls_the_page_instead_of_selecting() {
     assert!(h.state().canvas.scroll_offset.y > editing_before, "the finger drag scrolls while editing too");
 }
 
+/// The finger as the browser reports it for a drag: a touch event beside every pointer event,
+/// 40px at a time with a couple of frames between moves so time passes — a swipe with a
+/// velocity the page could inherit.
+fn flick(h: &mut egui_kittest::Harness<'_, WordApp>, from: f32, to: f32) {
+    let touch = |phase: egui::TouchPhase, pos: egui::Pos2| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase,
+        pos,
+        force: None,
+    };
+    let press = |pos: egui::Pos2, down: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: Default::default(),
+    };
+    let at = egui::pos2(195.0, from);
+    h.event(touch(egui::TouchPhase::Start, at));
+    h.event(egui::Event::PointerMoved(at));
+    h.event(press(at, true));
+    h.run_steps(2);
+    for y in ((to as i32)..(from as i32)).step_by(40).rev().map(|y| y as f32) {
+        let p = egui::pos2(195.0, y);
+        h.event(touch(egui::TouchPhase::Move, p));
+        h.event(egui::Event::PointerMoved(p));
+        h.run_steps(2);
+    }
+    let end = egui::pos2(195.0, to);
+    h.event(touch(egui::TouchPhase::End, end));
+    h.event(press(end, false));
+    h.run_steps(2);
+}
+
+/// #mobile: a flick carries. The velocity the finger left with becomes the page's, and friction
+/// takes it back over the next moments until the page rests — clamped at the document's end,
+/// and dragging nothing along the way.
+#[test]
+fn a_flick_keeps_the_page_moving_until_it_rests() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    // The fitted page barely overflows the phone (the sample is two pages), so there is no
+    // room for a fling to travel; at full zoom there is a document's length of it.
+    h.state_mut().session.run("view.zoom", &serde_json::json!({"value": 100})).unwrap();
+    h.run_steps(6);
+    flick(&mut h, 500.0, 340.0);
+    let lifted = h.state().canvas.scroll_offset.y;
+    assert!(lifted > 0.0, "the drag itself scrolled: {lifted}");
+    // The page keeps moving once the finger is gone.
+    h.run_steps(10);
+    let carried = h.state().canvas.scroll_offset.y;
+    assert!(carried > lifted, "the flick carried the page on: {lifted} -> {carried}");
+    // …and friction brings it to rest, within the document.
+    h.run_steps(240);
+    let rested = h.state().canvas.scroll_offset.y;
+    h.run_steps(60);
+    assert_eq!(h.state().canvas.scroll_offset.y, rested, "the page came to rest");
+    assert!(h.state().canvas.phone_drag.is_none(), "nothing is dragging the page anymore");
+    assert!(rested <= h.state().canvas.scroll_max.y, "the page rests within the document");
+}
+
+/// #mobile: a finger landing anywhere catches a page mid-flight — a fling in progress stops
+/// dead under it instead of running on behind the reader's back.
+#[test]
+fn a_finger_catches_the_page_mid_fling() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.state_mut().session.run("view.zoom", &serde_json::json!({"value": 100})).unwrap();
+    h.run_steps(6);
+    flick(&mut h, 500.0, 340.0);
+    // The fling is underway…
+    h.run_steps(2);
+    let lifted = h.state().canvas.scroll_offset.y;
+    h.run_steps(6);
+    assert!(h.state().canvas.scroll_offset.y > lifted, "the page is flinging past the finger's lift");
+    // …and a finger lands to stop it. The page may ease a hair more while the landing is
+    // delivered; what matters is that it then holds still under the finger.
+    let stop = egui::pos2(195.0, 300.0);
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::Start, pos: stop, force: None });
+    h.event(egui::Event::PointerMoved(stop));
+    h.event(egui::Event::PointerButton { pos: stop, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(4);
+    let caught = h.state().canvas.scroll_offset.y;
+    h.run_steps(30);
+    assert_eq!(h.state().canvas.scroll_offset.y, caught, "the page holds still under the finger");
+    assert!(h.state().canvas.phone_drag.is_none(), "the fling is over");
+}
+
 /// #mobile: the mouse's drag still selects at phone width — the finger gives up drag-select,
 /// nothing else does.
 /// A screen point on the body text `pos` (a document position), where a tap lands on words
@@ -5343,8 +5449,6 @@ fn the_phone_viewer_switches_to_a_dark_page() {
 /// drag, so swipes never pair; a clean double-tap still zooms.
 #[test]
 fn two_swipes_never_zoom_the_page() {
-    use egui_kittest::kittest::Queryable;
-
     let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
     app.ui.language = "en".into();
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
