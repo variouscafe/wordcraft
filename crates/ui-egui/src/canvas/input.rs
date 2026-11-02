@@ -95,6 +95,14 @@ fn apply_format_painter(app: &mut WordApp) {
 /// handles, then page hit testing, outlines, headers and footers, equations, selection and caret
 /// interaction.
 pub(super) fn mouse(app: &mut WordApp, ui: &Ui, resp: &egui::Response, rects: &[Rect], layout: &DocLayout, scale: f32) {
+    // A press that drags is no tap: it takes the multi-tap count with it, so a swipe between
+    // two taps — and two swipes in a row, the way a page is scrolled — never make the pair
+    // that double-taps (#mobile dogfooding: scrolling zoomed the page wider and narrower).
+    // Word breaks the chain the same way: drag-select after a double-click ends the run.
+    let tap_break = ui.ctx().options(|o| o.input_options.max_click_dist);
+    if resp.contains_pointer() && ui.input(|i| i.pointer.primary_down() && i.pointer.total_drag_delta().is_some_and(|d| d.length() > tap_break)) {
+        app.canvas.last_press = None;
+    }
     let Some(pointer) = route_pointer_targets(app, ui, resp, rects, layout, scale) else {
         return;
     };
@@ -158,8 +166,10 @@ fn handle_page_pointer(app: &mut WordApp, pointer: PagePointer<'_>) {
     let PagePointer { ui, resp, layout, p, page, x, y, story, finger, .. } = pointer;
     let mods = ui.input(|i| i.modifiers);
     // #mobile: a finger held on a word selects it — the viewer's way, where the mouse and the
-    // editing page keep the double-click. The grips then adjust it by finger.
+    // editing page keep the double-click. The grips then adjust it by finger. A hold is no tap
+    // either: it breaks the multi-tap count like a drag does.
     if finger && resp.long_touched() && crate::responsive::touch_reading(app, ui.ctx()) {
+        app.canvas.last_press = None;
         let _ = app.run("select.word", json!({}));
         return;
     }

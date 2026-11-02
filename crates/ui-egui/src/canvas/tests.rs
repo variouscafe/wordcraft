@@ -5336,3 +5336,71 @@ fn the_phone_viewer_switches_to_a_dark_page() {
     h.run_steps(4);
     assert!(h.query_all_by_label("Dark page").next().is_none(), "the desktop status bar has no moon");
 }
+
+/// #mobile: a swipe is no tap. Two swipes in a row — the way a page is scrolled — land within
+/// the double-tap delay and distance of each other, and counting them as taps made every
+/// second swipe zoom (the page widening and narrowing under scrolling). The chain breaks on a
+/// drag, so swipes never pair; a clean double-tap still zooms.
+#[test]
+fn two_swipes_never_zoom_the_page() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let rest = h.state().session.view.zoom;
+    let touch = |phase: egui::TouchPhase, pos: egui::Pos2| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase,
+        pos,
+        force: None,
+    };
+    let press = |pos: egui::Pos2, down: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: Default::default(),
+    };
+    let swipe = |h: &mut egui_kittest::Harness<'_, WordApp>, from: egui::Pos2, to: egui::Pos2| {
+        h.event(touch(egui::TouchPhase::Start, from));
+        h.event(egui::Event::PointerMoved(from));
+        h.event(press(from, true));
+        h.run_steps(2);
+        h.event(touch(egui::TouchPhase::Move, to));
+        h.event(egui::Event::PointerMoved(to));
+        h.run_steps(2);
+        h.event(touch(egui::TouchPhase::End, to));
+        h.event(press(to, false));
+        h.run_steps(2);
+    };
+    let from = egui::pos2(195.0, 520.0);
+    let to = egui::pos2(195.0, 380.0);
+    swipe(&mut h, from, to);
+    swipe(&mut h, from, to);
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.zoom, rest, "two swipes never zoomed");
+    assert!(h.state().canvas.phone_zoom_out.is_none(), "nothing was zoomed away from");
+    // A clean double-tap — press and release, twice, without a drag — still zooms.
+    let tap = |h: &mut egui_kittest::Harness<'_, WordApp>, at: egui::Pos2| {
+        h.event(touch(egui::TouchPhase::Start, at));
+        h.event(egui::Event::PointerMoved(at));
+        h.event(press(at, true));
+        h.run_steps(2);
+        h.event(touch(egui::TouchPhase::End, at));
+        h.event(press(at, false));
+        h.run_steps(2);
+    };
+    tap(&mut h, from);
+    tap(&mut h, from);
+    h.run_steps(4);
+    assert!(h.state().session.view.zoom > rest, "a real double-tap still zooms: {rest} -> {}", h.state().session.view.zoom);
+}
