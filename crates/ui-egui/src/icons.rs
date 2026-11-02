@@ -1279,6 +1279,27 @@ fn paint_view_and_tables(pen: &Pen, name: &str) -> bool {
         // A triangle filling most of its box: it is drawn at 9–12 pt beside combos and split
         // buttons, where a smaller one shrank to a dot (#535).
         "dropdown" => pen.fill(&[(3.0, 7.0), (17.0, 7.0), (10.0, 14.0)], c),
+        "moon" => {
+            // A crescent: the outer arc of one circle and the bite of another, opening high-right.
+            pen.fill(
+                &[
+                    (11.0, 4.4),
+                    (8.6, 5.0),
+                    (6.8, 6.6),
+                    (5.8, 9.0),
+                    (5.8, 11.4),
+                    (6.8, 13.8),
+                    (8.8, 15.6),
+                    (11.2, 16.4),
+                    (9.8, 14.2),
+                    (9.0, 12.2),
+                    (9.0, 10.0),
+                    (9.9, 7.8),
+                    (11.4, 6.0),
+                ],
+                a,
+            );
+        }
         "more" => {
             for x in [5.0, 10.0, 15.0] {
                 pen.fcircle(x, 10.0, 1.3, c);
