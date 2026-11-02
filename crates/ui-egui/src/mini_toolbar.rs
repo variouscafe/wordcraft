@@ -42,6 +42,9 @@ const COMBO_FONT_W: f32 = ROW2_W - (COMBO_SIZE_W + GAP + 2.0 * BTN_W + 3.0 * SPA
 /// control of both rows (#535: one row of a fixed width cut off everything after Align Left).
 pub const BAR_W: f32 = PAD_X * 2.0 + ROW2_W;
 pub const BAR_H: f32 = PAD_Y * 2.0 + ROW_H * 2.0 + ROW_GAP;
+/// The viewer's bar (#mobile): one row, and the air around its text buttons.
+const VIEWER_H: f32 = PAD_Y * 2.0 + ROW_H;
+const VIEWER_BTN_PAD: f32 = 8.0;
 
 /// The part of the selection the bar anchors to: the topmost selection rectangle that is actually
 /// visible inside `clip` (the scroll viewport), cut down to its visible portion. `None` when no
@@ -68,21 +71,27 @@ pub fn visible_anchor(selection_rects: impl IntoIterator<Item = Rect>, clip: Rec
     first
 }
 
-/// Where the bar sits for a selection line and viewport; `None` for degenerate inputs (NaN
-/// rects must never reach egui). Pure geometry, unit tested without a window.
+/// Where the formatting bar sits for a selection line and viewport; `None` for degenerate
+/// inputs (NaN rects must never reach egui). Pure geometry, unit tested without a window.
 pub fn anchor_rect(selection_top: f32, selection_left: f32, viewport: Rect) -> Option<Rect> {
+    anchor_rect_sized(selection_top, selection_left, viewport, Vec2::new(BAR_W, BAR_H))
+}
+
+/// [`anchor_rect`] for a bar of `size` — the viewer's single row anchors by the same rules as
+/// the formatting bar's two.
+pub fn anchor_rect_sized(selection_top: f32, selection_left: f32, viewport: Rect, size: Vec2) -> Option<Rect> {
     if !selection_top.is_finite() || !selection_left.is_finite() || !viewport.is_finite() || !viewport.is_positive() {
         return None;
     }
     // Horizontal: centre on the selection's start (a few points in), clamped inside the viewport.
     let cx = (selection_left + ANCHOR_INSET).clamp(viewport.left(), viewport.right());
-    let x = (cx - BAR_W / 2.0).clamp(viewport.left(), (viewport.right() - BAR_W).max(viewport.left()));
+    let x = (cx - size.x / 2.0).clamp(viewport.left(), (viewport.right() - size.x).max(viewport.left()));
     // Vertical: prefer above, then below. Check both viewport edges: a selection can be
     // partially scrolled out of view, so merely checking `above >= viewport.top()` is not enough.
-    let above = selection_top - VGAP - BAR_H;
+    let above = selection_top - VGAP - size.y;
     let below = selection_top + VGAP;
-    let above_fits = above >= viewport.top() && above + BAR_H <= viewport.bottom();
-    let below_fits = below >= viewport.top() && below + BAR_H <= viewport.bottom();
+    let above_fits = above >= viewport.top() && above + size.y <= viewport.bottom();
+    let below_fits = below >= viewport.top() && below + size.y <= viewport.bottom();
     let y = if above_fits {
         above
     } else if below_fits {
@@ -91,9 +100,9 @@ pub fn anchor_rect(selection_top: f32, selection_left: f32, viewport: Rect) -> O
         // Neither side has room (or the supplied anchor is outside the viewport). Keep the bar
         // inside the visible area whenever the viewport can accommodate its height.
         let desired = if above < viewport.top() { below } else { above };
-        desired.clamp(viewport.top(), (viewport.bottom() - BAR_H).max(viewport.top()))
+        desired.clamp(viewport.top(), (viewport.bottom() - size.y).max(viewport.top()))
     };
-    Some(Rect::from_min_size(pos2(x, y), Vec2::new(BAR_W, BAR_H)))
+    Some(Rect::from_min_size(pos2(x, y), size))
 }
 
 /// Where the bar and the controls in it were drawn last frame (`[bar, controls]`), kept in the
@@ -170,14 +179,18 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, selection: Rect, viewport: R
         }
         return;
     }
-    let Some(bar) = anchor_rect(selection.min.y, selection.min.x, viewport) else { return };
+    // #mobile: the phone's viewer swaps the formatting controls for the reader's verbs — a
+    // long-press selection has a way to copy.
+    let viewer = crate::responsive::touch_reading(app, ctx);
+    let t = Tokens::get(ctx);
+    let size = if viewer { viewer_bar_size(ctx, &t) } else { Vec2::new(BAR_W, BAR_H) };
+    let Some(bar) = anchor_rect_sized(selection.min.y, selection.min.x, viewport, size) else { return };
     // The bar belongs to the page: as the selection scrolls under the ribbon (or past the status
     // bar) it slides under it with the text, and goes once none of it shows.
     let shown = bar.intersect(viewport);
     if !shown.is_positive() {
         return;
     }
-    let t = Tokens::get(ctx);
     // The bar sits on the Middle layer: above the document (Background), below every popup and
     // menu (Foreground: the ribbon's drop-downs, the context menu, its own lists) and tooltip, so
     // it never covers one. It is pinned to the selection, not movable, and egui stops a click at
@@ -195,13 +208,59 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, selection: Rect, viewport: R
         let inner = bar.shrink2(Vec2::new(PAD_X, PAD_Y));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
         child.spacing_mut().item_spacing = Vec2::new(SPACING, ROW_GAP);
-        content(app, &mut child, &t, true);
-        // The page was drawn before the bar this frame: another frame shows or clears the preview.
-        if app.canvas.command_preview != app.canvas.command_previewed {
-            ctx.request_repaint();
+        if viewer {
+            viewer_content(app, &mut child, &t);
+        } else {
+            content(app, &mut child, &t, true);
+            // The page was drawn before the bar this frame: another frame shows or clears the preview.
+            if app.canvas.command_preview != app.canvas.command_previewed {
+                ctx.request_repaint();
+            }
         }
         let used = child.min_rect();
         ctx.data_mut(|d| d.insert_temp(shown_id(), [bar, used]));
+    });
+}
+
+/// The viewer's verbs over a read-only selection (#mobile): copy it, or take the whole document
+/// to — never the formatting controls, which belong to editing. Word's phone app offers the
+/// same over a selection in its viewer.
+fn viewer_cmds() -> [(String, &'static str); 2] {
+    [(tl!("Copy").to_string(), "edit.copy"), (tl!("Select All").to_string(), "select.all")]
+}
+
+/// The size of the viewer's bar (#mobile): one row as wide as its buttons. The labels are
+/// fixed, so as with the formatting bar the size never jitters as the selection changes.
+fn viewer_bar_size(ctx: &egui::Context, t: &Tokens) -> Vec2 {
+    // A painter off every layer, for measuring alone.
+    let painter = egui::Painter::new(ctx.clone(), egui::LayerId::background(), egui::Rect::EVERYTHING);
+    let font = crate::theme::TypeRung::Caption.regular();
+    let track = crate::theme::TypeRung::Caption.tracking();
+    let cmds = viewer_cmds();
+    let mut w = SPACING * (cmds.len() - 1) as f32;
+    for (label, _) in &cmds {
+        w += VIEWER_BTN_PAD * 2.0 + crate::theme::text_width(&painter, label, &font, track, t.text);
+    }
+    Vec2::new(w + PAD_X * 2.0, VIEWER_H)
+}
+
+/// The viewer's row of buttons ([`viewer_cmds`]), drawn like the status bar's text controls.
+fn viewer_content(app: &mut WordApp, ui: &mut egui::Ui, t: &Tokens) {
+    let font = crate::theme::TypeRung::Caption.regular();
+    let track = crate::theme::TypeRung::Caption.tracking();
+    ui.horizontal(|ui| {
+        for (label, id) in viewer_cmds() {
+            let w = crate::theme::text_width(ui.painter(), &label, &font, track, t.text);
+            let (r, resp) = ui.allocate_exact_size(Vec2::new(w + VIEWER_BTN_PAD * 2.0, ROW_H), Sense::click());
+            if resp.hovered() {
+                ui.painter().rect_filled(r, CornerRadius::same(4), t.hover);
+            }
+            crate::theme::paint_text(ui.painter(), r.center(), egui::Align2::CENTER_CENTER, &label, &font, track, t.text);
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label.clone()));
+            if resp.clicked() {
+                let _ = app.run(id, json!({}));
+            }
+        }
     });
 }
 
