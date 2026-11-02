@@ -104,6 +104,108 @@ pub fn persist() {
     }
 }
 
+/// The positions file (#local): one JSON map, name → `[page, x, y]` in page points, kept at
+/// the root of the browser's file system beside the documents directory.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const POSITIONS_FILE: &str = "positions.json";
+
+/// Where each document was last read to (#local): a page and a point on it, in page points.
+/// Held in memory (`None` until the file has been read), written as one small JSON file.
+static POSITIONS: std::sync::Mutex<Option<std::collections::HashMap<String, (usize, f32, f32)>>> = std::sync::Mutex::new(None);
+
+/// The positions map, empty until [load_positions] has read the file.
+fn positions() -> std::collections::HashMap<String, (usize, f32, f32)> {
+    POSITIONS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_default()
+}
+
+/// Remember where a document was read to (#local). Fire-and-forget: the write lands when it
+/// lands; the position is a convenience, never a dependency.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn store_position(name: &str, page: usize, x: f32, y: f32) {
+    if !storable(name, 0) || !x.is_finite() || !y.is_finite() {
+        return;
+    }
+    {
+        let mut held = POSITIONS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.get_or_insert_with(Default::default).insert(name.to_string(), (page, x, y));
+    }
+    #[cfg(target_arch = "wasm32")]
+    write_positions(positions());
+}
+
+/// Where a document was last read to (#local), if this browser remembers.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn load_position(name: &str) -> Option<(usize, f32, f32)> {
+    positions().get(name).copied()
+}
+
+/// Drop the positions of documents the store no longer keeps: their bytes are gone, and with
+/// them the point of resuming (#local).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn forget_positions(names: &[String]) {
+    let mut held = POSITIONS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(map) = held.as_mut() {
+        map.retain(|name, _| !names.contains(name));
+    }
+}
+
+/// The positions map as JSON: `{"Report.docx": [2, 0.0, 640.5], …}`.
+fn positions_to_json(map: &std::collections::HashMap<String, (usize, f32, f32)>) -> String {
+    let mut out = String::from("{");
+    for (i, (name, (page, x, y))) in map.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&serde_json::to_string(name).unwrap_or_default());
+        out.push_str(&format!(":[{page},{x},{y}]"));
+    }
+    out.push('}');
+    out
+}
+
+/// The positions map from JSON. A file that doesn't parse at all reads as no positions — a
+/// fresh start — and inside one that does, a row that isn't a page and two finite numbers is
+/// dropped, not argued with (the file is the browser's to corrupt).
+fn positions_from_json(text: &str) -> std::collections::HashMap<String, (usize, f32, f32)> {
+    let Ok(serde_json::Value::Object(rows)) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Default::default();
+    };
+    rows.into_iter()
+        .filter_map(|(name, v)| {
+            let nums = v.as_array()?.iter().map(|n| n.as_f64()).collect::<Vec<_>>();
+            match nums.as_slice() {
+                [Some(page), Some(x), Some(y)] => Some((name, (*page, *x, *y))),
+                _ => None,
+            }
+        })
+        .filter(|(_, (page, x, y))| *page >= 0.0 && *page <= 1e6 && x.is_finite() && y.is_finite())
+        .map(|(name, (page, x, y))| (name, (page as usize, x as f32, y as f32)))
+        .collect()
+}
+
+/// Read the positions file into memory, once, at startup (#local).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn load_positions() {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(async {
+        match opfs_positions::read_positions_async().await {
+            Ok(map) => *POSITIONS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(map),
+            Err(e) => log::warn!("couldn't read the kept reading positions: {e}"),
+        }
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    {}
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_positions(map: std::collections::HashMap<String, (usize, f32, f32)>) {
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(e) = opfs_positions::write_positions_async(&map).await {
+            log::warn!("couldn't keep the reading positions: {e}");
+        }
+    });
+}
+
 #[cfg(target_arch = "wasm32")]
 mod opfs {
     use wasm_bindgen::{JsCast as _, JsValue};
@@ -195,12 +297,60 @@ mod opfs {
             if let Err(e) = JsFuture::from(dir.remove_entry(&name)).await {
                 log::warn!("couldn't evict the stored document {name}: {e:?}");
             }
+            super::forget_positions(&[name]);
         }
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 use opfs::{load_async, store_async};
+
+#[cfg(target_arch = "wasm32")]
+mod positions_io {
+    use wasm_bindgen::{JsCast as _, JsValue};
+    use wasm_bindgen_futures::JsFuture;
+    use web_sys::{FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemWritableFileStream};
+
+    use super::{POSITIONS_FILE, positions_from_json, positions_to_json};
+
+    fn js(e: JsValue) -> String {
+        format!("{e:?}")
+    }
+
+    /// The root of the browser's file system, where the positions file lives beside the
+    /// documents directory.
+    async fn root() -> Result<FileSystemDirectoryHandle, String> {
+        let window = web_sys::window().ok_or("no window")?;
+        Ok(FileSystemDirectoryHandle::from(JsFuture::from(window.navigator().storage().get_directory()).await.map_err(js)?))
+    }
+
+    pub async fn read_positions_async() -> Result<std::collections::HashMap<String, (usize, f32, f32)>, String> {
+        let root = root().await?;
+        // No create: a first visit holds no positions, which is an empty map, not an error.
+        let Ok(found) = JsFuture::from(root.get_file_handle(POSITIONS_FILE)).await else {
+            return Ok(Default::default());
+        };
+        let file = FileSystemFileHandle::from(found);
+        let blob = web_sys::File::from(JsFuture::from(file.get_file()).await.map_err(js)?);
+        let text = js_sys::JsString::from(JsFuture::from(blob.text()).await.map_err(js)?).as_string().unwrap_or_default();
+        Ok(positions_from_json(&text))
+    }
+
+    pub async fn write_positions_async(map: &std::collections::HashMap<String, (usize, f32, f32)>) -> Result<(), String> {
+        let root = root().await?;
+        let mut make = web_sys::FileSystemGetFileOptions::new();
+        make.create(true);
+        let file = FileSystemFileHandle::from(JsFuture::from(root.get_file_handle_with_options(POSITIONS_FILE, &make)).await.map_err(js)?);
+        let stream = FileSystemWritableFileStream::from(JsFuture::from(file.create_writable()).await.map_err(js)?);
+        let bytes = positions_to_json(map).into_bytes();
+        wasm_bindgen_futures::JsFuture::from(FileSystemWritableFileStream::write_with_u8_array(&stream, &bytes).map_err(js)?).await.map_err(js)?;
+        wasm_bindgen_futures::JsFuture::from(web_sys::WritableStream::close(stream.as_ref())).await.map_err(js)?;
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+use positions_io as opfs_positions;
 
 #[cfg(test)]
 mod tests {
@@ -220,6 +370,32 @@ mod tests {
         assert!(!storable("bad\nname.docx", 1024), "a control character");
         assert!(!storable("Report.docx", (16 << 20) + 1), "over the byte bound");
         assert!(storable("Report.docx", 16 << 20), "the bound itself holds");
+    }
+
+    #[test]
+    fn positions_round_trip_and_drop_what_isnt_a_point() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("Report.docx".to_string(), (2, 0.0, 640.5));
+        map.insert("Notes.txt".to_string(), (0, 12.25, 8.5));
+        let text = positions_to_json(&map);
+        assert_eq!(positions_from_json(&text), map, "the file comes back as it went in");
+        // A row the browser corrupted, a negative page, an unbounded point: dropped, not fatal.
+        let junk = r#"{"ok.docx":[1,0.0,10.0],"short.docx":[1],"words.docx":["one"],"neg.docx":[-1,0.0,0.0]}"#;
+        let read = positions_from_json(junk);
+        assert_eq!(read.len(), 1, "only the well-formed row survives");
+        assert!(read.contains_key("ok.docx"));
+        assert!(positions_from_json("not json").is_empty());
+    }
+
+    #[test]
+    fn positions_live_in_memory_until_forgotten() {
+        store_position("Report.docx", 2, 0.0, 640.5);
+        assert_eq!(load_position("Report.docx"), Some((2, 0.0, 640.5)), "what was stored loads");
+        assert_eq!(load_position("Elsewhere.docx"), None, "an unkept document has no position");
+        store_position("bad/name.docx", 0, 0.0, 0.0);
+        assert_eq!(load_position("bad/name.docx"), None, "a path is not kept");
+        forget_positions(&["Report.docx".to_string()]);
+        assert_eq!(load_position("Report.docx"), None, "an evicted document's position goes with it");
     }
 
     #[test]

@@ -314,7 +314,7 @@ impl WordApp {
         // The active window's own work; with native windows each window does it again as it
         // draws, for itself.
         self.window_work(ctx);
-        self.drain_inbox();
+        self.drain_inbox(ctx);
         self.drain_pasted();
         self.watch_fonts(ctx);
         // A script, an agent or a later result may have made another document the active one.

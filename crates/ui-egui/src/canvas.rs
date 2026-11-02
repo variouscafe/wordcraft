@@ -177,6 +177,13 @@ pub struct CanvasState {
     /// [`prepare_view`]; see [`crate::responsive::reading_page_color`]). `None` wherever the
     /// surface isn't read on — every desktop Print page.
     pub(crate) paper: wordcraft_engine::cmd::view::ReadPageColor,
+    /// #mobile: where the opening document was last read to — a page and a point on it, in
+    /// page points — to resume once the phone's page-width fit has settled the geometry it is
+    /// measured against. Reset for every document.
+    pub(crate) phone_restore: Option<(usize, egui::Vec2)>,
+    /// #mobile: when the reading position was last written to the browser's memory, and the
+    /// scroll it was written at: writing is throttled, and only a move since asks for another.
+    pub(crate) position_saved: Option<(f64, egui::Vec2)>,
     pub context_issue: Option<serde_json::Value>,
     pub context_synonyms: Option<serde_json::Value>,
     /// The right-click context menu is open (the mini toolbar stands down while it is).
@@ -412,6 +419,8 @@ impl Default for CanvasState {
             phone_fit_pending: true,
             phone_drag: None,
             paper: wordcraft_engine::cmd::view::ReadPageColor::None,
+            phone_restore: None,
+            position_saved: None,
             context_issue: None,
             context_synonyms: None,
             obj_drag: None,
@@ -841,6 +850,57 @@ fn update_canvas_scroll_state(
             app.canvas.phone_fit_pending = false;
             let _ = app.run("view.zoom", json!({"value": (z * 100.0).round() as u64}));
         }
+    }
+    // #mobile: resume where the document was last read to — the page and point the browser
+    // remembered — once the fit has settled the geometry the point is measured against. Until
+    // then it waits; a fit that never comes (a window the mouse uses) takes it with the
+    // pending flag.
+    if let Some(mut restore) = app.canvas.phone_restore.take() {
+        if app.canvas.phone_fit_pending {
+            app.canvas.phone_restore = Some(restore);
+        } else {
+            restore.0 = restore.0.min(layout.pages.len().saturating_sub(1));
+            let ph = layout.pages.get(restore.0).map(|p| crate::canvas::geometry::sane_dim(p.h, 1e6)).unwrap_or(0.0);
+            let top = GAP + restore.0 as f32 * (ph * geo.scale + GAP) + restore.1.y * geo.scale;
+            let after = egui::vec2((restore.1.x * geo.scale).max(0.0), top).clamp(egui::Vec2::ZERO, app.canvas.scroll_max);
+            app.canvas.scroll_request = Some(after);
+            // The browser already holds this place; marking it written keeps the next frame's
+            // save from reading the not-yet-landed offset as a move.
+            app.canvas.position_saved = Some((ui.input(|i| i.time), after));
+        }
+    }
+    save_reading_position(app, ui, geo, out.inner_rect);
+}
+
+/// #mobile: keep where the document is being read — the page at the top of the window and a
+/// point on it — in the browser's memory for the next visit ([`Services::store_position`]).
+/// Written at most every few seconds, and only once the reading has moved since the last
+/// write, so an open page costs the browser nothing.
+fn save_reading_position(app: &mut WordApp, ui: &Ui, geo: &Geometry, viewport: Rect) {
+    if app.session.view.read_mode || app.canvas.phone_fit_pending {
+        return;
+    }
+    let off = app.canvas.scroll_offset;
+    let now = ui.input(|i| i.time);
+    let due = match app.canvas.position_saved {
+        None => true,
+        Some((t, written)) => now - t > 3.0 && written != off,
+    };
+    if !due {
+        return;
+    }
+    let Some(name) =
+        app.session.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).or_else(|| app.session.file_name.clone())
+    else {
+        return;
+    };
+    let page = app.canvas.viewed_page.filter(|_| app.canvas.scroll_max.y > 0.0);
+    let point = page
+        .zip(geo.rects.get(app.canvas.viewed_page.unwrap_or(0)))
+        .map(|(_, r)| egui::vec2((off.x / geo.scale).max(0.0), ((viewport.top() - r.top()) / geo.scale).max(0.0)));
+    if let (Some(page), Some(point), Some(store)) = (page, point, app.services.store_position.as_ref()) {
+        store(&name, page, point);
+        app.canvas.position_saved = Some((now, off));
     }
 }
 

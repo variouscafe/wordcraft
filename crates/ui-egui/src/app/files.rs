@@ -422,7 +422,7 @@ impl WordApp {
 
     /// Files that arrived asynchronously (web picker, drops): documents open, pictures insert,
     /// recipient lists (CSV/TSV, spreadsheets, or a text file asked for as one) load as recipients.
-    pub(crate) fn drain_inbox(&mut self) {
+    pub(crate) fn drain_inbox(&mut self, ctx: &egui::Context) {
         let Some(inbox) = self.services.inbox.clone() else { return };
         let files = std::mem::take(&mut *inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         let mut placed_picture = false;
@@ -449,10 +449,17 @@ impl WordApp {
                 let r = self.run("file.open", json!({"path": name, "data": wordcraft_engine::cmd::insert::base64_encode(&bytes)}));
                 // The browser keeps what opened under its name, so Recent can reopen it without
                 // the picker; a document that didn't open is kept by no one.
-                if r.is_ok()
-                    && let Some(store) = &self.services.store_document
-                {
-                    store(&name, &bytes);
+                if r.is_ok() {
+                    if let Some(store) = &self.services.store_document {
+                        store(&name, &bytes);
+                    }
+                    // #mobile: a phone's page resumes where this document was last read to
+                    // (`store_position`); a window the mouse uses opens as it always did.
+                    if crate::responsive::is_phone_ctx(ctx)
+                        && let Some(point) = self.services.load_position.as_ref().and_then(|load| load(&name))
+                    {
+                        self.canvas.phone_restore = Some(point);
+                    }
                 }
                 r
             };
