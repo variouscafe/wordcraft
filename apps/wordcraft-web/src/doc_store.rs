@@ -199,7 +199,7 @@ pub fn load_positions() {
 
 #[cfg(target_arch = "wasm32")]
 fn write_positions(map: std::collections::HashMap<String, (usize, f32, f32)>) {
-    wasm_bindgen_futures::spawn_local(async {
+    wasm_bindgen_futures::spawn_local(async move {
         if let Err(e) = opfs_positions::write_positions_async(&map).await {
             log::warn!("couldn't keep the reading positions: {e}");
         }
