@@ -1054,3 +1054,62 @@ fn backstage_save_as_sidebar_opens_save_as_page() {
     h.run_steps(4);
     assert_eq!(h.state().ui.backstage_page, "saveAs");
 }
+
+/// Phone width (390 pt): the side menu is an icon rail, every template tile fits on the
+/// screen, and the touch flow Home → New → Blank document creates a document and closes the
+/// Backstage. Below ~600 pt the labelled 200 pt menu plus the page's 40 pt margins left
+/// ~110 pt of content, so the tiles ran off the screen and could not be tapped.
+#[test]
+fn narrow_backstage_fits_and_creates_a_document_by_tap() {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
+    a.ui.language = "en".into();
+    assert!(a.start_screen());
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        a,
+    );
+    h.run_steps(8);
+    // The nav is an icon rail, on screen.
+    let new_row = h.get_by_role_and_label(egui::accesskit::Role::Button, "New");
+    let r = new_row.rect();
+    assert!(r.width() <= 64.0, "nav row is an icon rail, not {r:?}");
+    assert!(r.max.x <= 390.0 && r.min.x >= 0.0, "nav row is on the screen");
+    // Home's first tile is fully on screen too.
+    let blank = h.get_by_role_and_label(egui::accesskit::Role::Button, "Blank document");
+    let b = blank.rect();
+    assert!(b.max.x <= 390.0 && b.min.x >= 0.0, "Blank document tile is on the screen, not {b:?}");
+    // The flow a phone user takes: tap New, then the Blank document tile.
+    new_row.click();
+    h.run_steps(4);
+    assert_eq!(h.state().ui.backstage_page, "new");
+    let blank = h.get_by_role_and_label(egui::accesskit::Role::Button, "Blank document");
+    let b = blank.rect();
+    assert!(b.max.x <= 390.0 && b.min.x >= 0.0, "tile overflows the screen: {b:?}");
+    blank.click();
+    h.run_steps(4);
+    assert!(h.state().has_document(), "Blank document created a document");
+    assert!(!h.state().ui.backstage, "the Backstage closed");
+}
+
+/// Desktop width: the same start screen keeps the labelled 200 pt menu (nothing narrows).
+#[test]
+fn wide_backstage_keeps_the_labelled_menu() {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
+    a.ui.language = "en".into();
+    assert!(a.start_screen());
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        a,
+    );
+    h.run_steps(6);
+    let r = h.get_by_role_and_label(egui::accesskit::Role::Button, "New").rect();
+    assert_eq!(r.width(), 200.0, "the labelled menu keeps its width");
+}

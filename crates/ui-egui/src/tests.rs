@@ -6168,7 +6168,7 @@ fn pasted_picture_inserts_only_when_the_page_is_the_edit_target() {
     a.session.run("select.collapse", &json!({"end": true})).unwrap();
     a.services.inbox = Some(Inbox::default());
     a.services.inbox.as_ref().unwrap().lock().unwrap().push(("drop.png".into(), png_bytes([5, 5, 5, 255])));
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     assert_eq!(object_count(&mut a), 2);
 }
 
@@ -6254,7 +6254,7 @@ fn change_picture_replaces_instead_of_inserting() {
     let before = a.selected_picture_media().unwrap();
     a.change_picture_target = a.selected_picture_media();
     a.services.inbox.as_ref().unwrap().lock().unwrap().push(("new.png".into(), png_bytes([30, 200, 30, 255])));
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     assert_eq!(object_count(&mut a), 1);
     assert_ne!(a.selected_picture_media().unwrap(), before);
     assert!(a.change_picture_target.is_none());
@@ -6270,7 +6270,7 @@ fn several_dropped_images_are_all_inserted() {
         q.push(("a.png".into(), png_bytes([200, 30, 30, 255])));
         q.push(("b.png".into(), png_bytes([30, 200, 30, 255])));
     }
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     assert_eq!(object_count(&mut a), 2);
 }
 
@@ -6285,7 +6285,7 @@ fn several_dropped_images_all_join_a_selected_canvas() {
         q.push(("a.png".into(), png_bytes([200, 30, 30, 255])));
         q.push(("b.png".into(), png_bytes([30, 200, 30, 255])));
     }
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     let members = a.session.run("canvas.member", &json!({})).unwrap();
     assert_eq!(members["members"].as_array().map(|m| m.len()), Some(2));
 }
@@ -6298,7 +6298,7 @@ fn insert_without_pending_adds_and_stale_target_clears() {
     insert_picture(&mut a, [200, 30, 30, 255]);
     a.session.run("select.collapse", &json!({"end": true})).unwrap();
     a.services.inbox.as_ref().unwrap().lock().unwrap().push(("second.png".into(), png_bytes([30, 30, 200, 255])));
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     assert_eq!(object_count(&mut a), 2);
     // Stale target (another picture's key) clears instead of replacing the new selection.
     a.change_picture_target = Some("m0000-gone.png".into());
@@ -6639,14 +6639,14 @@ fn a_font_picked_on_the_web_is_added_listed_and_kept() {
     a.run("font.add", json!({})).unwrap();
     assert_eq!(*asked.borrow(), "font");
     inbox.lock().unwrap().push(("Uifont-Regular.ttf".into(), font.clone()));
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     a.watch_fonts(&ctx);
     assert!(a.previews.families().iter().any(|f| f == FAMILY), "listed in the font menu at once");
     assert_eq!(*kept.borrow(), vec![("Uifont-Regular.ttf".to_string(), font.len())]);
     assert!(body_text(&a).contains(UNSAVED), "the document stays open");
     // Junk named like a font is refused, and nothing is kept.
     inbox.lock().unwrap().push(("junk.woff2".into(), b"wOF2junk".to_vec()));
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     assert_eq!(kept.borrow().len(), 1);
     a.run("font.remove", json!({"family": FAMILY})).unwrap();
     a.watch_fonts(&ctx);
@@ -6667,20 +6667,20 @@ fn an_existing_list_picked_on_the_web_loads_recipients() {
     assert_eq!(a.run("ui.openRecipientList", json!({})).unwrap(), json!({"pending": true}));
     assert_eq!(*asked.borrow(), "recipients");
     inbox.lock().unwrap().push(("people.txt".into(), b"Name\tCity\nAda\tLondon\n".to_vec()));
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     assert_eq!(a.session.merge.headers, vec!["Name", "City"]);
     assert!(!a.recipient_list_pending);
     assert!(body_text(&a).contains(UNSAVED), "the document stays open");
     inbox.lock().unwrap().push(("more.csv".into(), b"Name\nBo\nCy\n".to_vec()));
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     assert_eq!(a.session.merge.rows.len(), 2);
     // A CSV picked through the picker must not turn the next .txt drop into recipients.
     a.run("ui.openRecipientList", json!({})).unwrap();
     inbox.lock().unwrap().push(("people.csv".into(), b"Name,City\nAda,London\n".to_vec()));
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     assert!(!a.recipient_list_pending);
     inbox.lock().unwrap().push(("notes.txt".into(), b"A plain text document.\nAnother line.\n".to_vec()));
-    a.drain_inbox();
+    a.drain_inbox(&egui::Context::default());
     assert_eq!(prompt(&a), None, "the TXT opens like any document, beside the first");
     assert!(body_text(&a).contains("A plain text document."), "the TXT opened as a document");
     let first = a.session.documents().first().map(|d| d.id).unwrap();
@@ -6690,6 +6690,53 @@ fn an_existing_list_picked_on_the_web_loads_recipients() {
     a.run("ui.openRecipientList", json!({})).unwrap();
     a.run("format.bold", json!({})).unwrap();
     assert!(!a.recipient_list_pending);
+}
+
+/// Web (#local): a document that arrives through the inbox is kept under its name for Recent,
+/// and so is every Save of it — an export or a copy is not the document and stays out. Junk
+/// that fails to open is kept by no one.
+#[test]
+fn web_documents_are_kept_for_recent_on_open_and_save() {
+    let mut a = typed();
+    let kept = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, usize)>::new()));
+    let kept_seen = kept.clone();
+    a.services.store_document = Some(Box::new(move |name, bytes| kept_seen.borrow_mut().push((name.to_string(), bytes.len()))));
+    a.services.download = Some(Box::new(|_: &str, _: &[u8]| Ok(())));
+    let inbox: Inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    a.services.inbox = Some(inbox.clone());
+    inbox.lock().unwrap().push(("notes.txt".into(), b"A plain text document.\n".to_vec()));
+    a.drain_inbox(&egui::Context::default());
+    assert_eq!(*kept.borrow(), vec![("notes.txt".to_string(), "A plain text document.\n".len())], "the opened document is kept");
+    // A Save writes the document itself: kept, under its .docx name.
+    a.run("file.save", json!({})).unwrap();
+    let saved = kept.borrow().last().cloned();
+    assert!(saved.as_ref().is_some_and(|(name, bytes)| name.ends_with(".docx") && *bytes > 100), "a save keeps the document: {saved:?}");
+    let count = kept.borrow().len();
+    // An export is a copy of the document, not the document.
+    a.run("file.exportPdf", json!({})).unwrap();
+    assert_eq!(kept.borrow().len(), count, "an export is not kept");
+    // Junk named like a document doesn't open and isn't kept.
+    inbox.lock().unwrap().push(("junk.docx".into(), b"not a document".to_vec()));
+    a.drain_inbox(&egui::Context::default());
+    assert_eq!(kept.borrow().len(), count, "what didn't open is kept by no one");
+}
+
+/// Web (#local): Recent reopens the kept copy through the host rather than a path — without
+/// the hook (the desktop) the entry still opens from the file system, and a missing file is
+/// the error it always was.
+#[test]
+fn recent_reopens_the_kept_copy_in_the_browser() {
+    let mut a = typed();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    a.services.open_stored_document = Some(Box::new(move |name| seen.borrow_mut().push(name.to_string())));
+    a.ui.backstage = true;
+    assert!(crate::backstage::open_recent(&mut a, "notes.txt").is_ok());
+    assert_eq!(*asked.borrow(), vec!["notes.txt".to_string()], "the host is asked for the kept copy");
+    assert!(!a.ui.backstage, "File closes as an open does");
+    // Desktop: no hook, a path that isn't there is an error the list can show.
+    let mut a = typed();
+    assert!(crate::backstage::open_recent(&mut a, "/no/such/document.docx").is_err());
 }
 
 /// Issue #859: lifting the pen jumped the view back to the caret, usually on page 1. Drawing

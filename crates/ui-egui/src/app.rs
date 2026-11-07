@@ -234,6 +234,11 @@ impl WordApp {
         ctx.add_plugin(super::a11y::FocusGuard);
         updates_ui::tick(self, ctx);
         crate::language_packs::tick(self);
+        // Touch was used this pass: for a while afterwards the selection shows its finger
+        // grips (`canvas`), which a mouse user never sees.
+        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Touch { .. }))) {
+            self.canvas.touch_at = Some(ctx.input(|i| i.time));
+        }
         let lang = i18n::Lang::from_pref(&self.ui.language);
         i18n::set_current(lang);
         crate::rtl::sync(ctx);
@@ -323,7 +328,7 @@ impl WordApp {
         // The active window's own work; with native windows each window does it again as it
         // draws, for itself.
         self.window_work(ctx);
-        self.drain_inbox();
+        self.drain_inbox(ctx);
         self.drain_pasted();
         self.watch_fonts(ctx);
         // A script, an agent or a later result may have made another document the active one.

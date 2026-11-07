@@ -162,6 +162,35 @@ pub struct CanvasState {
     /// file name in the window caption can be drawn.
     pub(crate) ime_faces: Vec<std::sync::Arc<wordcraft_fonts::FontFace>>,
     pub want_focus: bool,
+    /// Phone-width reading ([`crate::responsive::touch_reading`]): the page is a viewer, and the
+    /// title bar's Edit button switches it to editing (bringing the keyboard up); Done drops it
+    /// back. Reset for every document — each one opens to read, as Word's phone app opens them.
+    pub phone_editing: bool,
+    /// The zoom a phone viewer's double-tap zoomed away from, to restore on the next double-tap.
+    /// `None` while the page sits at its own zoom. Reset with every document.
+    pub phone_zoom_out: Option<f32>,
+    /// #mobile: the page hasn't been fitted to the phone's width yet (a document's first frames
+    /// there, and every document not seen before). A window the mouse uses stays untouched.
+    pub phone_fit_pending: bool,
+    /// #mobile: a drag-scroll underway on the page: the finger pressed on it, or the fling it
+    /// left behind at lift (see [`viewer_drag_scroll`]). Reset for every document.
+    pub(crate) phone_drag: Option<PhoneDrag>,
+    /// #mobile: the session has already applied the phone's ruler default — the rulers start
+    /// hidden on a phone-width viewport (tab-stop editing is a pointer affair, and the row buys
+    /// reading space). Once per session, so a deliberate View › Show › Ruler stays on through
+    /// resizes and rotation; a window the mouse uses never crosses the phone width.
+    pub(crate) phone_ruler_defaulted: bool,
+    /// The reading page colour in effect on the page shown this frame (stamped by
+    /// [`prepare_view`]; see [`crate::responsive::reading_page_color`]). `None` wherever the
+    /// surface isn't read on — every desktop Print page.
+    pub(crate) paper: wordcraft_engine::cmd::view::ReadPageColor,
+    /// #mobile: where the opening document was last read to — a page and a point on it, in
+    /// page points — to resume once the phone's page-width fit has settled the geometry it is
+    /// measured against. Reset for every document.
+    pub(crate) phone_restore: Option<(usize, egui::Vec2)>,
+    /// #mobile: when the reading position was last written to the browser's memory, and the
+    /// scroll it was written at: writing is throttled, and only a move since asks for another.
+    pub(crate) position_saved: Option<(f64, egui::Vec2)>,
     pub context_issue: Option<serde_json::Value>,
     pub context_synonyms: Option<serde_json::Value>,
     /// The right-click context menu is open (the mini toolbar stands down while it is).
@@ -175,6 +204,9 @@ pub struct CanvasState {
     pub eq_options: Option<EquationFrame>,
     /// Screen rect of the selection's first line, for the floating mini toolbar.
     pub mini_anchor: Option<Rect>,
+    /// When touch input was last seen (`logic` stamps it): for that while afterwards, a
+    /// selection shows its finger grips, which a mouse user never needs.
+    pub touch_at: Option<f64>,
     /// The selection the mini toolbar was put away for by a click outside the document (the
     /// ribbon, a pane, the status bar); it comes back when the selection changes.
     pub mini_dismissed: Option<wordcraft_engine::Selection>,
@@ -292,6 +324,17 @@ pub struct CanvasState {
 
 type TablePreviewKey = ((String, serde_json::Value, u64, u64, wordcraft_engine::Selection), std::sync::Arc<DocLayout>);
 
+/// The two moments of a phone drag-scroll (#mobile).
+pub(crate) enum PhoneDrag {
+    /// The finger is on the page. Its recent positions (seconds, screen point) measure the
+    /// velocity it would leave with: one that slowed to a stop before lifting carries only its
+    /// stillness in the window.
+    Pressed(std::collections::VecDeque<(f64, egui::Vec2)>),
+    /// The finger lifted at this velocity (screen px/s); the page carries it on, friction
+    /// taking some of it back every frame until the page rests.
+    Flung(egui::Vec2),
+}
+
 impl CanvasState {
     /// Another document is shown in the window: everything about the page that was shown (drags,
     /// menus, the input method's composition, a scroll in progress, rendered pages…) starts
@@ -314,6 +357,7 @@ impl CanvasState {
             read_viewport: old.read_viewport,
             web_viewport: old.web_viewport,
             scroll_to_caret: !seen,
+            phone_fit_pending: !seen,
             ime_reset,
             ..CanvasState::default()
         };
@@ -353,6 +397,7 @@ impl Default for CanvasState {
             textures: HashMap::new(),
             tiles: HashMap::new(),
             page_keys: PageKeys::default(),
+            touch_at: None,
             markup_facts: std::cell::Cell::new(None),
             scroll_to_caret: true,
             keep_view: false,
@@ -386,6 +431,14 @@ impl Default for CanvasState {
             ime_preedit_range: None,
             ime_faces: Vec::new(),
             want_focus: true,
+            phone_editing: false,
+            phone_zoom_out: None,
+            phone_fit_pending: true,
+            phone_drag: None,
+            phone_ruler_defaulted: false,
+            paper: wordcraft_engine::cmd::view::ReadPageColor::None,
+            phone_restore: None,
+            position_saved: None,
             context_issue: None,
             context_synonyms: None,
             obj_drag: None,
@@ -509,12 +562,25 @@ struct CanvasView {
 
 fn prepare_view(app: &mut WordApp, ui: &Ui, full: Rect, layout: &DocLayout) -> CanvasView {
     let read_mode = app.session.view.read_mode;
+    // The reading page colour follows the reader (#mobile): Read Mode's own columns, and the
+    // phone's page — a Print-mode page read like a book. A desktop Print page keeps Word's
+    // Switch Modes. Stamped on the canvas first, so the page rasters and the egui paper below
+    // draw the colour it picks.
+    app.canvas.paper = crate::responsive::reading_page_color(app, ui.ctx());
     // The paper under each page, as the page raster draws it without a page color: the dark page
-    // of View › Switch Modes, or in Read Mode the Page color's white, sepia or dark paper.
+    // of View › Switch Modes, or in Read Mode the Page color's white, sepia or dark paper — and
+    // the phone's reading colour, which the stamp above carries into the render options.
     let paper = {
         let p = page_render_options(app, false).blank_paper();
         Color32::from_rgb(p.0, p.1, p.2)
     };
+    // A phone-width viewport's rulers start hidden (#mobile): once per session, before the frame
+    // that draws them, so the first phone frame never flashes the row. A later View ›
+    // Show › Ruler works and stays on (the once-marker doesn't re-hide it).
+    if !app.canvas.phone_ruler_defaulted && crate::responsive::is_phone(ui) && app.session.view.ruler {
+        app.canvas.phone_ruler_defaulted = true;
+        let _ = app.run("view.ruler", json!({"value": false}));
+    }
     let show_ruler = app.session.view.ruler
         && app.session.view.mode == wordcraft_layout::ViewMode::Print
         && !read_mode
@@ -698,7 +764,14 @@ fn configure_scroll_area(app: &mut WordApp, ui: &Ui, view: &CanvasView, motion: 
         .auto_shrink([false, false])
         // Bringing the caret into view glides there, or jumps with animation effects off.
         .animated(view.animate)
-        .scroll_source(egui::scroll_area::ScrollSource { mouse_wheel: false, ..Default::default() });
+        .scroll_source(if crate::responsive::is_phone(ui) {
+            // #mobile: a finger drag scrolls through `viewer_drag_scroll` below — the page
+            // follows the finger 1:1 — so egui's own drag-scroll stands down at phone width
+            // (its kinetic gesture misbehaved on phones).
+            egui::scroll_area::ScrollSource { mouse_wheel: false, drag: egui::scroll_area::DragScroll::Never, ..Default::default() }
+        } else {
+            egui::scroll_area::ScrollSource { mouse_wheel: false, ..Default::default() }
+        });
     if app.session.view.read_mode {
         scroll_area = scroll_area.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
     }
@@ -795,6 +868,167 @@ fn update_canvas_scroll_state(
     // The viewport barely moves between frames; the auto-scroll decides this frame's scroll before
     // the scroll area is built, so it reads last frame's viewport.
     app.canvas.viewport = Some(out.inner_rect);
+    // #mobile: a phone opens a document fitted to the page's width — the page whole across the
+    // screen, no sideways pan for every line, the reading size a double-tap away. A document
+    // first drawn in a window the mouse uses is never fitted (a later narrowing doesn't zoom
+    // under anyone), and neither is one already seen: it keeps the zoom it was left at.
+    if app.canvas.phone_fit_pending {
+        if !crate::responsive::is_phone(ui) {
+            app.canvas.phone_fit_pending = false;
+        } else if !app.session.view.read_mode
+            && app.session.view.mode == wordcraft_layout::ViewMode::Print
+            && let Some(pw) = layout.pages.first().map(|p| crate::canvas::geometry::sane_dim(p.w, 1e5))
+            && out.inner_rect.width() > 50.0
+        {
+            let z = ((out.inner_rect.width() - 2.0 * GAP - 20.0) / pw / PX_PER_PT).clamp(0.1, 5.0);
+            app.canvas.phone_fit_pending = false;
+            let _ = app.run("view.zoom", json!({"value": (z * 100.0).round() as u64}));
+        }
+    }
+    // #mobile: resume where the document was last read to — the page and point the browser
+    // remembered — once the fit has settled the geometry the point is measured against. Until
+    // then it waits; a fit that never comes (a window the mouse uses) takes it with the
+    // pending flag.
+    if let Some(mut restore) = app.canvas.phone_restore.take() {
+        if app.canvas.phone_fit_pending {
+            app.canvas.phone_restore = Some(restore);
+        } else {
+            restore.0 = restore.0.min(layout.pages.len().saturating_sub(1));
+            let ph = layout.pages.get(restore.0).map(|p| crate::canvas::geometry::sane_dim(p.h, 1e6)).unwrap_or(0.0);
+            let top = GAP + restore.0 as f32 * (ph * geo.scale + GAP) + restore.1.y * geo.scale;
+            let after = egui::vec2((restore.1.x * geo.scale).max(0.0), top).clamp(egui::Vec2::ZERO, app.canvas.scroll_max);
+            app.canvas.scroll_request = Some(after);
+            // The browser already holds this place; marking it written keeps the next frame's
+            // save from reading the not-yet-landed offset as a move.
+            app.canvas.position_saved = Some((ui.input(|i| i.time), after));
+        }
+    }
+    save_reading_position(app, ui, geo, out.inner_rect);
+}
+
+/// #mobile: keep where the document is being read — the page at the top of the window and a
+/// point on it — in the browser's memory for the next visit ([`Services::store_position`]).
+/// Written at most every few seconds, and only once the reading has moved since the last
+/// write, so an open page costs the browser nothing.
+fn save_reading_position(app: &mut WordApp, ui: &Ui, geo: &Geometry, viewport: Rect) {
+    if app.session.view.read_mode || app.canvas.phone_fit_pending {
+        return;
+    }
+    let off = app.canvas.scroll_offset;
+    let now = ui.input(|i| i.time);
+    let due = match app.canvas.position_saved {
+        None => true,
+        Some((t, written)) => now - t > 3.0 && written != off,
+    };
+    if !due {
+        return;
+    }
+    let Some(name) =
+        app.session.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).or_else(|| app.session.file_name.clone())
+    else {
+        return;
+    };
+    let page = app.canvas.viewed_page.filter(|_| app.canvas.scroll_max.y > 0.0);
+    let point = page
+        .zip(geo.rects.get(app.canvas.viewed_page.unwrap_or(0)))
+        .map(|(_, r)| egui::vec2((off.x / geo.scale).max(0.0), ((viewport.top() - r.top()) / geo.scale).max(0.0)));
+    if let (Some(page), Some(point), Some(store)) = (page, point, app.services.store_position.as_ref()) {
+        store(&name, page, point);
+        app.canvas.position_saved = Some((now, off));
+    }
+}
+
+/// #mobile: how much of a finger's history its release velocity is measured over — long enough
+/// that frame granularity averages out, short enough that a deliberate stop before lifting
+/// flings nothing.
+const DRAG_HISTORY_S: f64 = 0.09;
+/// #mobile: a fling's momentum, decaying over this many seconds (an iOS-like drag).
+const FLING_TAU: f32 = 0.4;
+/// #mobile: below this velocity (screen px/s) a flinging page is at rest.
+const FLING_MIN: f32 = 75.0;
+
+/// #mobile: a finger's drag scrolls the page at phone width, the offset following the finger
+/// 1:1 through `scroll_request` (egui's scroll-area drag-scroll stood down for it — see
+/// [`configure_scroll_area`]). Reading or editing alike: a finger never drag-selects, the mouse
+/// never scrolls this way. Nothing moves while the press could still be a tap. When the finger
+/// lifts, the page keeps the velocity it left with for a moment — a flick — giving it back to
+/// friction each frame until it rests; a finger landing anywhere catches a page mid-flight.
+fn viewer_drag_scroll(app: &mut WordApp, ui: &Ui, resp: &egui::Response) {
+    if !crate::responsive::is_phone(ui) {
+        app.canvas.phone_drag = None;
+        return;
+    }
+    // A finger pressed anywhere owns the page: on the canvas it drags it, elsewhere it catches
+    // a fling in flight. The mouse never comes in here — only a touch does.
+    let finger_down = ui.input(|i| i.any_touches() && i.pointer.primary_down());
+    if finger_down {
+        if resp.contains_pointer() && ui.input(|i| i.pointer.is_decidedly_dragging()) {
+            let mut drag = match app.canvas.phone_drag.take() {
+                Some(PhoneDrag::Pressed(hist)) => hist,
+                _ => std::collections::VecDeque::new(),
+            };
+            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                let now = ui.input(|i| i.time);
+                drag.push_back((now, p.to_vec2()));
+                while drag.front().is_some_and(|&(t, _)| now - t > DRAG_HISTORY_S) {
+                    drag.pop_front();
+                }
+            }
+            let d = ui.input(|i| i.pointer.delta());
+            let after = (app.canvas.scroll_offset - d).clamp(egui::Vec2::ZERO, app.canvas.scroll_max);
+            if after != app.canvas.scroll_offset {
+                app.canvas.scroll_request = Some(after);
+                ui.ctx().request_repaint();
+            }
+            app.canvas.phone_drag = Some(PhoneDrag::Pressed(drag));
+        } else {
+            app.canvas.phone_drag = None;
+        }
+        return;
+    }
+    // The finger is up. A drag that just ended hands the page its release velocity, and a fling
+    // in flight gives some of its speed to friction each frame until it rests (or a finger
+    // catches it above).
+    let vel = match app.canvas.phone_drag.take() {
+        Some(PhoneDrag::Pressed(hist)) => release_velocity(&hist),
+        Some(PhoneDrag::Flung(vel)) => Some(vel),
+        None => None,
+    };
+    let Some(mut vel) = vel else { return };
+    let dt = ui.input(|i| i.unstable_dt).min(0.1);
+    vel *= (-dt / FLING_TAU).exp();
+    if vel.length() < FLING_MIN {
+        return; // At rest.
+    }
+    let before = app.canvas.scroll_offset;
+    let after = (before - vel * dt).clamp(egui::Vec2::ZERO, app.canvas.scroll_max);
+    if after == before {
+        return; // The page is at its end; the fling dies there.
+    }
+    // An axis pinned at an edge has stopped: it gives its velocity up, the other keeps its own.
+    if (after.x - before.x).abs() < f32::EPSILON {
+        vel.x = 0.0;
+    }
+    if (after.y - before.y).abs() < f32::EPSILON {
+        vel.y = 0.0;
+    }
+    if vel != egui::Vec2::ZERO {
+        app.canvas.phone_drag = Some(PhoneDrag::Flung(vel));
+        app.canvas.scroll_request = Some(after);
+        ui.ctx().request_repaint();
+    }
+}
+
+/// The velocity a finger left the page with (#mobile): the distance it covered over its
+/// history's span. A history that spans less than a third of the window says nothing — the
+/// finger only just landed — and one that slowed to a stop carries only its stillness.
+fn release_velocity(hist: &std::collections::VecDeque<(f64, egui::Vec2)>) -> Option<egui::Vec2> {
+    let ((t0, p0), (t1, p1)) = (hist.front()?, hist.back()?);
+    let span = t1 - t0;
+    if span < DRAG_HISTORY_S / 3.0 {
+        return None;
+    }
+    Some((*p1 - *p0) / span as f32)
 }
 
 fn update_canvas_focus(app: &mut WordApp, ui: &mut Ui, resp: &egui::Response, ime_geometry: Option<(Rect, Rect)>, ime_interrupt: bool) {
@@ -808,28 +1042,107 @@ fn update_canvas_focus(app: &mut WordApp, ui: &mut Ui, resp: &egui::Response, im
     let pointer_click = resp.clicked_by(egui::PointerButton::Primary);
     let accesskit_click = resp.clicked() && !pointer_click && !keyboard_click;
     let focus_click = pointer_click || accesskit_click || resp.drag_started();
-    if focus_click {
-        ui.memory_mut(|memory| memory.interrupt_ime());
-    }
-    // Not while a modal dialog is open: it has the keyboard, and the page takes it when it closes.
-    let wants = app.canvas.want_focus && !app.modal_open();
-    if focus_click || (wants && !resp.has_focus()) {
-        resp.request_focus();
-    }
-    if focus_click || wants {
+    // Phone-width reading (#mobile): the page is a viewer until the title bar's Edit button
+    // switches it to editing, so a touch never takes the keyboard — the soft keyboard would
+    // cover the text being read. Focus it somehow has (Done was pressed after Edit) is given
+    // up, which also ends any composition and closes the keyboard.
+    let reading = crate::responsive::touch_reading(app, ui.ctx());
+    if reading {
         app.canvas.want_focus = false;
+        if resp.has_focus() {
+            resp.surrender_focus();
+        }
+    } else {
+        if focus_click {
+            ui.memory_mut(|memory| memory.interrupt_ime());
+        }
+        // Not while a modal dialog is open: it has the keyboard, and the page takes it when it closes.
+        let wants = app.canvas.want_focus && !app.modal_open();
+        if focus_click || (wants && !resp.has_focus()) {
+            resp.request_focus();
+        }
+        if focus_click || wants {
+            app.canvas.want_focus = false;
+        }
     }
     app.canvas.widget_id = Some((resp.id, ui.ctx().cumulative_pass_nr()));
-    if resp.has_focus() {
+    if resp.has_focus() && !reading {
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(resp.id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true })
         });
     }
-    app.canvas.focused = resp.has_focus();
+    app.canvas.focused = !reading && resp.has_focus();
     // One observation per viewport pass, after every event and command for the pass has been
     // applied: the owner, generation, bounded surrounding text and change cause all come from
     // this same settled state.
     crate::keys::observe_ime(app, ui.ctx(), ime_geometry, ime_interrupt);
+}
+
+/// A grip at each end of the selection (as on a phone): for a while after touch input, a finger
+/// adjusts the grip's end — the other stays put. A mouse has its own drag and never sees these.
+/// Own foreground layer, because the scroll area's response is registered after the page's
+/// content, so inside it the page would take the press. A zoomed page is wider than the phone's
+/// screen and the selection's end can sit off it: the grip is clamped into view (as Word mobile
+/// does); its stem still points at the true end.
+fn paint_touch_grips(
+    app: &mut WordApp,
+    ui: &Ui,
+    visible_clip: Rect,
+    ends: (Option<Rect>, Option<Rect>),
+    rects: &[Rect],
+    layout: &DocLayout,
+    geo: &Geometry,
+) {
+    if app.canvas.touch_at.is_none_or(|t| ui.input(|i| i.time - t) >= 15.0) {
+        return;
+    }
+    let (Some(first), Some(last)) = (ends.0, ends.1) else { return };
+    if app.canvas.dragging || app.canvas.context_menu_open || app.session.column_segments().is_some() || app.session.cell_range().is_some() {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    let ctx = ui.ctx().clone();
+    egui::Area::new(egui::Id::unique("touch_sel_grips")).order(egui::Order::Foreground).fixed_pos(Pos2::ZERO).interactable(true).show(&ctx, |aui| {
+        aui.set_clip_rect(visible_clip);
+        let ap = aui.painter().clone();
+        let (a, b) = app.session.sel.ordered();
+        for (end, fixed, moving, at) in
+            [("start", b.clone(), a.clone(), pos2(first.min.x, first.max.y)), ("end", a.clone(), b.clone(), pos2(last.max.x, last.max.y))]
+        {
+            let at = pos2(
+                at.x.clamp(visible_clip.min.x + 14.0, visible_clip.max.x - 14.0),
+                at.y.clamp(visible_clip.min.y + 14.0, visible_clip.max.y - 14.0),
+            );
+            let c = Rect::from_center_size(at + vec2(0.0, 9.0), egui::vec2(18.0, 18.0));
+            let grip = aui.interact(c, egui::Id::unique("touch_sel_grip").with(end), egui::Sense::click_and_drag());
+            grip.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::Role::Button,
+                    true,
+                    if end == "start" { tl!("Selection start grip") } else { tl!("Selection end grip") },
+                )
+            });
+            if grip.drag_started() {
+                // Extend keeps the anchor, so the grip's own end becomes the moving one.
+                app.session.sel.anchor = fixed;
+                app.session.sel.focus = moving;
+            }
+            if grip.dragged()
+                && let Some(p) = grip.interact_pointer_pos()
+                && let Some((page, x, y)) = page_at(rects, layout, geo.scale, p)
+                && let Some(pos) = layout.hit(page, x, y, app.session.sel.focus.story)
+                && pos != app.session.sel_ends().focus
+            {
+                // Straight to the session, as the page's own drag does: the app's
+                // `run` would scroll on every frame.
+                let pj = serde_json::to_value(&pos).unwrap_or_default();
+                let _ = app.session.run("caret.set", &json!({"pos": pj, "extend": true}));
+                app.session.page_hint = page;
+            }
+            ap.line_segment([at, at + vec2(0.0, 9.0)], egui::Stroke::new(2.5, t.accent));
+            ap.circle_filled(at + vec2(0.0, 9.0), 9.0, t.accent);
+        }
+    });
 }
 
 fn dismiss_balloon_on_canvas_click(app: &mut WordApp, ui: &Ui, resp: &egui::Response) {
@@ -1066,13 +1379,17 @@ fn paint_read_aloud_highlight(
     }
 }
 
-fn canvas_response(ui: &mut Ui, content: Rect, scroll_target: Option<Rect>) -> egui::Response {
+fn canvas_response(ui: &mut Ui, content: Rect, scroll_target: Option<Rect>, finger: bool) -> egui::Response {
     // A fixed id: an automatic one follows how many widgets came before, which Read Mode's
     // chrome changes, and a new id dropped the keyboard focus, so the arrows, Page Up/Down
     // and Escape did nothing in Read Mode until the reader clicked a page (#1772).
     // It also keeps the focus when Focus hides the rulers (#1678).
+    // A finger drag scrolls the page (the scroll area's touch drag-scroll takes the gesture),
+    // so while a finger is down the canvas senses no drag: the mouse's drag selects text,
+    // and touch selection is the double-tap and the grips (#mobile).
     ui.advance_cursor_after_rect(content);
-    let response = ui.interact(content, egui::Id::unique("wordcraft_canvas"), Sense::click_and_drag());
+    let sense = if finger { Sense::CLICK } else { Sense::click_and_drag() };
+    let response = ui.interact(content, egui::Id::unique("wordcraft_canvas"), sense);
     if let Some(target) = scroll_target {
         ui.scroll_to_rect(Rect::from_min_size(ui.min_rect().min + target.min.to_vec2(), target.size()), None);
     }
@@ -1188,6 +1505,7 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
     // A click on the page leaves the selected comment balloon.
     dismiss_balloon_on_canvas_click(app, ui, &resp);
     update_canvas_focus(app, ui, &resp, ime_geometry, ime_interrupt);
+    viewer_drag_scroll(app, ui, &resp);
     // Screen readers: the document under the canvas, with the caret (#488).
     crate::a11y::expose(app, ui.ctx(), resp.id, layout, &rects, area);
     // The buttons that start or stop middle-click scrolling don't also click the page.
@@ -1197,7 +1515,10 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
     if !middle_gesture {
         crate::content_controls::clicks(app, &resp);
     }
-    let secondary_clicked = resp.secondary_clicked() && !middle_gesture;
+    // #mobile: a long-press on the viewer selects the word (canvas/input.rs) and the reader's
+    // bar follows it; the desktop context menu a long touch also summons is an editing
+    // surface's tool, so the viewer never raises it.
+    let secondary_clicked = resp.secondary_clicked() && !middle_gesture && !crate::responsive::touch_reading(app, ui.ctx());
     handle_secondary_selection(app, &resp, &rects, layout, geo, secondary_clicked);
     // Shift+F10 opens the same menu below the caret, for the selection or the word there (#821).
     let from_keys = std::mem::take(&mut app.canvas.context_menu_from_keys);
@@ -1301,6 +1622,9 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
         rulers(app, ui, h, v, &rects, layout, geo.scale);
     }
     crate::mini_toolbar::track_dismissal(app, ui.ctx(), area);
+    // The floating toolbar follows the selection (#mobile): the editing page shows the
+    // formatting controls, the viewer the reader's verbs — a long-press selection has a way
+    // to copy.
     if let Some(sel) = app.canvas.mini_anchor
         && app.ui.mini_toolbar
     {
@@ -1395,7 +1719,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     let out = scroll_area.show_viewport(&mut ui_area, |ui, viewport| {
         origin = ui.min_rect().min - viewport.min.to_vec2();
         let content = Rect::from_min_size(ui.min_rect().min, geo.size);
-        let resp = canvas_response(ui, content, scroll_target);
+        let resp = canvas_response(ui, content, scroll_target, ui.input(|i| i.any_touches()));
         // Read Mode's neighbouring columns end right at the viewport's edges: keep their
         // shadows from showing there as hairlines.
         let clip = if app.session.view.read_mode { ui.clip_rect().shrink2(vec2(3.0, 0.0)) } else { ui.clip_rect() };
@@ -1504,8 +1828,11 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         // Alignment previews can move the selected text while the pointer is still over a mini
         // toolbar button. Keep the bar anchored to the live selection until the preview ends, or
         // it can move out from under the pointer and flicker between preview and live layouts.
+        let grip_ends = (screen_rects.first().copied(), screen_rects.last().copied());
         let anchor_rects = if app.canvas.command_previewed.is_some() { live_selection_screen_rects(app, &rects, geo.scale) } else { screen_rects };
         app.canvas.mini_anchor = crate::mini_toolbar::visible_anchor(anchor_rects, visible_clip);
+        paint_touch_grips(app, ui, visible_clip, grip_ends, &rects, &layout, &geo);
+
         // Content controls: the frame of the one the caret is in (all of them in Design Mode).
         crate::content_controls::paint(app, &painter, &t, &layout, &rects, geo.scale);
         paint_read_aloud_highlight(app, &painter, &layout, &rects, &geo, &t);

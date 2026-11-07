@@ -531,6 +531,44 @@ fn ruler_margin_drags_on_even_mirrored_pages_move_the_visible_edge() {
     assert_eq!(margin_drag(MarginEdge::Top, 50.0, &sect, true), (MarginEdge::Top, dragged_margin(MarginEdge::Top, 50.0, &sect)));
 }
 
+/// #mobile: a phone-width viewport starts with the rulers hidden — tab-stop editing is a
+/// pointer affair, and the row buys reading space. Once per session: a deliberate
+/// View › Show › Ruler works afterwards and is never re-hidden, and a desktop-width window
+/// keeps the rulers' on default.
+#[test]
+fn a_phone_width_viewport_starts_without_the_rulers() {
+    let a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Reading on a phone.")), Default::default());
+    let mut h: H = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(0.25).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        a,
+    );
+    h.run_steps(6);
+    assert!(!h.state().session.view.ruler, "the phone viewport starts with the rulers hidden");
+    assert!(h.state().canvas.phone_ruler_defaulted, "the default applies once");
+    // A deliberate View › Show › Ruler still shows them, and the default doesn't re-hide them.
+    h.state_mut().run("view.ruler", json!({"value": true})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().session.view.ruler, "a deliberate toggle stays on");
+
+    // A desktop-width window keeps the rulers on: the default is the phone's alone.
+    let wide = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Editing at a desk.")), Default::default());
+    let mut h: H = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(0.25).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        wide,
+    );
+    h.run_steps(6);
+    assert!(h.state().session.view.ruler, "a desktop window keeps the rulers on");
+    assert!(!h.state().canvas.phone_ruler_defaulted);
+}
+
 /// Dragging a margin edge on the vertical ruler leaves the view where it is. Each step of the
 /// drag runs `layout.margins`, which brought the caret back into view: with the caret off
 /// screen (the bottom margin is far from the text at the top) the page slid under the pointer
@@ -1224,19 +1262,20 @@ fn balloon_glyphs_at_scale(text: &str, width: f32, ppp: f32) -> Option<Vec<(char
         let atlas = ui.fonts(|fonts| fonts.image());
         for r in &shape.galley.rows {
             out.extend(r.row.glyphs.iter().map(|gl| (gl.chr, shape.pos.x + r.pos.x + gl.pos.x)));
+            // A wrapped row's advance stays within the width: that is the wrap contract. Glyph
+            // ink may overhang it — macOS 27's Geeza Pro paints its initial ش a couple of points
+            // past its advance — the way Word lets a final swash overhang the wrap width.
+            // epaint rounds glyph origins individually while row advance stays fractional; the
+            // two edge roundings can differ by one physical pixel.
+            assert!(
+                shape.pos.x + r.pos.x + r.size.x <= width + 1.0 / ppp,
+                "wrapped row: origin {}, width {}, limit {} (text {:?})",
+                shape.pos.x + r.pos.x,
+                r.size.x,
+                width,
+                text
+            );
             for glyph in &r.row.glyphs {
-                // epaint rounds glyph origins individually while row advance stays fractional.
-                // The two edge roundings can differ by one physical pixel.
-                assert!(
-                    shape.pos.x + r.pos.x + glyph.max_x() <= width + 1.0 / ppp,
-                    "wrapped glyph {:?}: origin {}, max {}, row width {}, limit {} (text {:?})",
-                    glyph.chr,
-                    shape.pos.x + r.pos.x,
-                    glyph.max_x(),
-                    r.size.x,
-                    width,
-                    text
-                );
                 if !matches!(glyph.chr, '(' | ')') {
                     continue;
                 }
@@ -4992,4 +5031,812 @@ fn a_pictures_corrections_and_crop_change_its_page_key() {
     let plain = pages::page_content_key(&at([0.0; 4], PicFx::default()));
     assert_ne!(plain, pages::page_content_key(&at([0.1, 0.0, 0.0, 0.0], PicFx::default())), "crop");
     assert_ne!(plain, pages::page_content_key(&at([0.0; 4], PicFx::new(10_000, 0, 0))), "brightness");
+}
+
+/// Touch selection grips (#mobile): after touch input, a selection shows a grip at each end;
+/// dragging the end grip moves that end and leaves the other in place — the phone's way of
+/// adjusting a selection, where the mouse's drag-select doesn't exist.
+#[test]
+fn touch_grips_adjust_the_selection() {
+    use egui_kittest::kittest::Queryable;
+    use serde_json::json;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run();
+    h.state_mut().session.run("select.text", &json!({"text": "Studio"})).unwrap();
+    h.run();
+    let before = h.state().session.sel.ordered().1;
+    // No touch yet: no grips.
+    assert!(h.query_all_by_label("Selection end grip").next().is_none(), "no grip before touch");
+    // Touch input makes them appear.
+    h.event(egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase: egui::TouchPhase::Start,
+        pos: egui::pos2(195.0, 400.0),
+        force: None,
+    });
+    h.run();
+    let grip = h.get_by_role_and_label(egui::accesskit::Role::Button, "Selection end grip");
+    let start = grip.rect().center();
+    // Drag the end grip to the right, a little below (stays in the same line of text).
+    h.event(egui::Event::PointerMoved(start));
+    h.run();
+    h.event(egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run();
+    h.event(egui::Event::PointerMoved(start + egui::vec2(30.0, 0.0)));
+    h.run();
+    h.event(egui::Event::PointerButton {
+        pos: start + egui::vec2(30.0, 0.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    h.run();
+    let after = h.state().session.sel.ordered().1;
+    assert!(after != before, "the end grip moved the selection's end: {before:?} -> {after:?}");
+    assert_eq!(h.state().session.sel.ordered().0, h.state().session.sel.ordered().0, "the start stays");
+}
+
+/// #mobile: a phone-width page opens as a viewer. Touching it never focuses it — the soft
+/// keyboard would cover the text being read — so typing on it changes nothing; the title bar's
+/// Edit button switches the page to editing (the keyboard follows the focus), and Done drops it
+/// back to reading. A desktop-width click still focuses the page as always.
+#[test]
+fn phone_pages_read_until_edit_is_pressed() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run();
+    let tap = |h: &mut egui_kittest::Harness<'_, WordApp>, pos: egui::Pos2| {
+        h.event(egui::Event::PointerMoved(pos));
+        h.run();
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run();
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run();
+    };
+    // Reading: a tap on the page neither focuses it nor lets a keystroke through.
+    tap(&mut h, egui::pos2(195.0, 500.0));
+    assert!(!h.state().canvas.focused, "a touch on the reading page takes no keyboard");
+    let rev = h.state().session.rev();
+    h.event(egui::Event::Text("q".into()));
+    h.run();
+    assert_eq!(h.state().session.rev(), rev, "typing on the reading page edits nothing");
+    // Edit: the page takes the keyboard and typing works.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    assert!(h.state().canvas.focused, "Edit hands the keyboard to the page");
+    let rev = h.state().session.rev();
+    h.event(egui::Event::Text("q".into()));
+    h.run();
+    assert!(h.state().session.rev() > rev, "typing on the editing page edits the document");
+    // Done: back to reading, the keyboard goes down again.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Done").click();
+    h.run_steps(3);
+    assert!(!h.state().canvas.focused, "Done takes the keyboard back off the page");
+    let rev = h.state().session.rev();
+    h.event(egui::Event::Text("q".into()));
+    h.run();
+    assert_eq!(h.state().session.rev(), rev, "after Done, typing edits nothing again");
+}
+
+/// The viewer is a phone-width behaviour alone (#mobile): a desktop window's page takes the
+/// keyboard on the first click, as it always has.
+#[test]
+fn desktop_pages_are_never_viewers() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run();
+    let pos = h.state().canvas.viewport.expect("the page is drawn").center();
+    h.event(egui::Event::PointerMoved(pos));
+    h.run();
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run();
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run();
+    assert!(h.state().canvas.focused, "a desktop click on the page takes the keyboard");
+}
+
+/// #mobile: a finger drag scrolls the page, so it never drag-selects — the selection stays what
+/// it was while the view moves. A mouse drag at the same phone width still selects, and the
+/// floating formatting toolbar waits for Edit: reading never shows it over the text.
+#[test]
+fn a_finger_drag_scrolls_the_page_instead_of_selecting() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let before_scroll = h.state().canvas.scroll_offset.y;
+    // The finger as the browser reports it: a touch event beside every pointer event.
+    let touch = |phase: egui::TouchPhase, pos: egui::Pos2| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase,
+        pos,
+        force: None,
+    };
+    let press = |pos: egui::Pos2, down: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: Default::default(),
+    };
+    let at = egui::pos2(195.0, 500.0);
+    h.event(touch(egui::TouchPhase::Start, at));
+    h.event(egui::Event::PointerMoved(at));
+    h.event(press(at, true));
+    h.run_steps(2);
+    for y in [460.0, 420.0, 380.0, 340.0] {
+        let p = egui::pos2(195.0, y);
+        h.event(touch(egui::TouchPhase::Move, p));
+        h.event(egui::Event::PointerMoved(p));
+        h.run_steps(2);
+    }
+    let end = egui::pos2(195.0, 340.0);
+    h.event(touch(egui::TouchPhase::End, end));
+    h.event(press(end, false));
+    h.run_steps(2);
+    h.run_steps(3);
+    assert!(h.state().canvas.scroll_offset.y > before_scroll, "the finger drag scrolled: {} -> {before_scroll}", h.state().canvas.scroll_offset.y);
+    assert!(h.state().session.sel.is_collapsed(), "the finger drag selected nothing");
+    // Editing scrolls the same way, keyboard and all.
+    use egui_kittest::kittest::Queryable;
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    let editing_before = h.state().canvas.scroll_offset.y;
+    let at = egui::pos2(195.0, 500.0);
+    h.event(touch(egui::TouchPhase::Start, at));
+    h.event(egui::Event::PointerMoved(at));
+    h.event(press(at, true));
+    h.run_steps(2);
+    for y in [460.0, 420.0, 380.0] {
+        let p = egui::pos2(195.0, y);
+        h.event(touch(egui::TouchPhase::Move, p));
+        h.event(egui::Event::PointerMoved(p));
+        h.run_steps(2);
+    }
+    let end = egui::pos2(195.0, 380.0);
+    h.event(touch(egui::TouchPhase::End, end));
+    h.event(press(end, false));
+    h.run_steps(3);
+    assert!(h.state().canvas.scroll_offset.y > editing_before, "the finger drag scrolls while editing too");
+}
+
+/// The finger as the browser reports it for a drag: a touch event beside every pointer event,
+/// 40px at a time with a couple of frames between moves so time passes — a swipe with a
+/// velocity the page could inherit.
+fn flick(h: &mut egui_kittest::Harness<'_, WordApp>, from: f32, to: f32) {
+    let touch = |phase: egui::TouchPhase, pos: egui::Pos2| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase,
+        pos,
+        force: None,
+    };
+    let press = |pos: egui::Pos2, down: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: Default::default(),
+    };
+    let at = egui::pos2(195.0, from);
+    h.event(touch(egui::TouchPhase::Start, at));
+    h.event(egui::Event::PointerMoved(at));
+    h.event(press(at, true));
+    h.run_steps(2);
+    for y in ((to as i32)..(from as i32)).step_by(40).rev().map(|y| y as f32) {
+        let p = egui::pos2(195.0, y);
+        h.event(touch(egui::TouchPhase::Move, p));
+        h.event(egui::Event::PointerMoved(p));
+        h.run_steps(2);
+    }
+    let end = egui::pos2(195.0, to);
+    h.event(touch(egui::TouchPhase::End, end));
+    h.event(press(end, false));
+    h.run_steps(2);
+}
+
+/// #mobile: a flick carries. The velocity the finger left with becomes the page's, and friction
+/// takes it back over the next moments until the page rests — clamped at the document's end,
+/// and dragging nothing along the way.
+#[test]
+fn a_flick_keeps_the_page_moving_until_it_rests() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    // The fitted page barely overflows the phone (the sample is two pages), so there is no
+    // room for a fling to travel; at full zoom there is a document's length of it.
+    h.state_mut().session.run("view.zoom", &serde_json::json!({"value": 100})).unwrap();
+    h.run_steps(6);
+    flick(&mut h, 500.0, 340.0);
+    let lifted = h.state().canvas.scroll_offset.y;
+    assert!(lifted > 0.0, "the drag itself scrolled: {lifted}");
+    // The page keeps moving once the finger is gone.
+    h.run_steps(10);
+    let carried = h.state().canvas.scroll_offset.y;
+    assert!(carried > lifted, "the flick carried the page on: {lifted} -> {carried}");
+    // …and friction brings it to rest, within the document.
+    h.run_steps(240);
+    let rested = h.state().canvas.scroll_offset.y;
+    h.run_steps(60);
+    assert_eq!(h.state().canvas.scroll_offset.y, rested, "the page came to rest");
+    assert!(h.state().canvas.phone_drag.is_none(), "nothing is dragging the page anymore");
+    assert!(rested <= h.state().canvas.scroll_max.y, "the page rests within the document");
+}
+
+/// #mobile: a finger landing anywhere catches a page mid-flight — a fling in progress stops
+/// dead under it instead of running on behind the reader's back.
+#[test]
+fn a_finger_catches_the_page_mid_fling() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.state_mut().session.run("view.zoom", &serde_json::json!({"value": 100})).unwrap();
+    h.run_steps(6);
+    flick(&mut h, 500.0, 340.0);
+    // The fling is underway…
+    h.run_steps(2);
+    let lifted = h.state().canvas.scroll_offset.y;
+    h.run_steps(6);
+    assert!(h.state().canvas.scroll_offset.y > lifted, "the page is flinging past the finger's lift");
+    // …and a finger lands to stop it. The page may ease a hair more while the landing is
+    // delivered; what matters is that it then holds still under the finger.
+    let stop = egui::pos2(195.0, 300.0);
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::Start, pos: stop, force: None });
+    h.event(egui::Event::PointerMoved(stop));
+    h.event(egui::Event::PointerButton { pos: stop, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(4);
+    let caught = h.state().canvas.scroll_offset.y;
+    h.run_steps(30);
+    assert_eq!(h.state().canvas.scroll_offset.y, caught, "the page holds still under the finger");
+    assert!(h.state().canvas.phone_drag.is_none(), "the fling is over");
+}
+
+/// #mobile: the mouse's drag still selects at phone width — the finger gives up drag-select,
+/// nothing else does.
+/// A screen point on the body text `pos` (a document position), where a tap lands on words
+/// however the page is fitted.
+fn body_point(h: &mut egui_kittest::Harness<'_, WordApp>, pos: wordcraft_doc::Pos) -> egui::Pos2 {
+    let c = h.state_mut().session.layout().caret(&pos).expect("a caret in the body");
+    crate::canvas::page_to_screen(h.state_mut(), c.page, c.x + 1.0, c.top + c.height / 2.0).expect("on screen")
+}
+
+#[test]
+fn a_mouse_drag_still_selects_at_phone_width() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let press = |pos: egui::Pos2, down: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: Default::default(),
+    };
+    let at = body_point(&mut h, wordcraft_doc::Pos::body(2, 5));
+    let to = body_point(&mut h, wordcraft_doc::Pos::body(4, 5));
+    h.event(egui::Event::PointerMoved(at));
+    h.event(press(at, true));
+    h.run_steps(2);
+    h.event(egui::Event::PointerMoved(to));
+    h.run_steps(2);
+    h.run_steps(2);
+    h.event(press(to, false));
+    h.run_steps(2);
+    assert!(!h.state().session.sel.is_collapsed(), "the mouse drag selected text");
+}
+
+/// #mobile: the floating toolbar follows a selection in both of the page's modes. The viewer's
+/// bar carries the reader's verbs — copy, select all — and never the formatting controls; the
+/// editing page keeps Word's two formatting rows. A press on the chrome puts it away for that
+/// selection in either mode, as it always did.
+#[test]
+fn the_floating_toolbar_follows_the_page_mode() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(2);
+    let toolbar = |h: &egui_kittest::Harness<'_, WordApp>| h.ctx.data(|d| d.get_temp::<[Rect; 2]>(crate::mini_toolbar::shown_id()));
+    // A selection while reading (a long-press is the viewer's way; the selection comes as a
+    // command would): the bar shows the reader's verbs, none of the formatting.
+    h.state_mut().session.run("select.text", &serde_json::json!({"text": "Studio"})).unwrap();
+    h.run_steps(2);
+    assert!(!h.state().session.sel.is_collapsed(), "a selection exists while reading");
+    assert!(toolbar(&h).is_some(), "the viewer's bar shows over the selection");
+    assert!(h.query_all_by_label("Copy").next().is_some(), "the viewer's bar offers Copy");
+    assert!(h.query_all_by_label("Bold").next().is_none(), "no formatting while reading");
+    // Edit: the same selection carries the formatting rows instead (the press on the chrome
+    // put the bar away for it, so a fresh one is made).
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    assert!(h.query_all_by_label("Copy").next().is_none(), "the press on Edit put the bar away for that selection");
+    let other = body_point(&mut h, wordcraft_doc::Pos::body(3, 5));
+    for _ in 0..2 {
+        h.event(egui::Event::PointerMoved(other));
+        h.event(egui::Event::PointerButton { pos: other, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run_steps(2);
+        h.event(egui::Event::PointerButton { pos: other, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(2);
+    }
+    assert!(toolbar(&h).is_some(), "a selection while editing shows the toolbar");
+    assert!(h.query_all_by_label("Bold").next().is_some(), "the editing page keeps the formatting rows");
+}
+
+/// #mobile: the viewer's own way to a copy: hold a finger on a word — it selects — and the
+/// reader's bar appears over it; Copy leaves the selection as it was, and the bar follows a
+/// new selection. Done drops the page back to reading and the bar to its reader's verbs.
+#[test]
+fn the_viewer_selects_and_offers_copy() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let at = body_point(&mut h, wordcraft_doc::Pos::body(2, 5));
+    // A hold: press and stay a while.
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::Start, pos: at, force: None });
+    h.event(egui::Event::PointerMoved(at));
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(55);
+    assert!(!h.state().session.sel.is_collapsed(), "the hold selected the word");
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::End, pos: at, force: None });
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let sel = h.state().session.sel.clone();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Copy").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.sel, sel, "copying leaves the selection as it was");
+}
+
+/// #mobile: the browser remembers where a document was last read to. Opening it at phone
+/// width resumes there once the page-width fit has settled; the resumed place is written back,
+/// and a scroll on asks for the new place to be kept, throttled.
+#[test]
+fn a_phone_resumes_where_the_document_was_read() {
+    use std::sync::{Arc, Mutex};
+
+    let saved: Arc<Mutex<Vec<(String, usize, egui::Vec2)>>> = Arc::new(Mutex::new(Vec::new()));
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut services = crate::Services::default();
+    let text = "A line of reading.\n".repeat(200);
+    services.inbox = Some(Arc::new(Mutex::new(vec![("Notes.txt".to_string(), text.into_bytes())])));
+    let rec = saved.clone();
+    services.store_position = Some(Box::new(move |name, page, p| rec.lock().unwrap().push((name.to_string(), page, p))));
+    let q = asked.clone();
+    services.load_position = Some(Box::new(move |name| {
+        q.lock().unwrap().push(name.to_string());
+        Some((1, egui::vec2(0.0, 400.0)))
+    }));
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), services);
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(30);
+    let off = h.state().canvas.scroll_offset.y;
+    assert!(off > 300.0, "the page resumed well into the document: {off}");
+    assert!(h.state().canvas.phone_restore.is_none(), "the restore is spent");
+    assert_eq!(asked.lock().unwrap().as_slice(), ["Notes.txt"], "the remembered name was asked for");
+    assert!(saved.lock().unwrap().is_empty(), "the resumed place is already kept: nothing to write");
+    // Reading on: the new place is written back, throttled to every few seconds.
+    flick(&mut h, 500.0, 340.0);
+    h.run_steps(220);
+    let written = saved.lock().unwrap().clone();
+    assert!(!written.is_empty(), "a move asked for the new place to be kept");
+    assert!(written.iter().all(|(n, _, _)| n == "Notes.txt"), "kept under the document's name: {written:?}");
+    assert!(written.iter().any(|(_, p, _)| *p >= 1), "kept where the reading has reached: {written:?}");
+}
+
+/// #mobile: the resume is a phone page's alone. A desktop window opens a document at the top
+/// as it always did, and never asks the browser for a remembered place.
+#[test]
+fn a_desktop_window_opens_at_the_top_as_always() {
+    use std::sync::{Arc, Mutex};
+
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut services = crate::Services::default();
+    let text = "A line of reading.\n".repeat(200);
+    services.inbox = Some(Arc::new(Mutex::new(vec![("Notes.txt".to_string(), text.into_bytes())])));
+    let q = asked.clone();
+    services.load_position = Some(Box::new(move |name| {
+        q.lock().unwrap().push(name.to_string());
+        Some((1, egui::vec2(0.0, 400.0)))
+    }));
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), services);
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(30);
+    assert!(asked.lock().unwrap().is_empty(), "a desktop window asks for no remembered place");
+    assert_eq!(h.state().canvas.scroll_offset.y, 0.0, "the document opens at the top, as always");
+}
+
+/// #mobile: a phone page reading as a viewer shows no ribbon — the text gets the room — and
+/// the title bar's File button opens the File page (New, Open, Recent) in its place. Edit
+/// brings the ribbon back with the keyboard.
+#[test]
+fn a_reading_phone_page_shows_no_ribbon_but_carries_file() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    // Reading: no ribbon tab is drawn, and File is a title-bar button.
+    assert!(h.query_all_by_label("Home").next().is_none(), "the ribbon is away while the page reads");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "File").click();
+    h.run_steps(3);
+    assert!(h.state().ui.backstage, "File opens from the title bar");
+    assert!(h.query_all_by_label("Recent").next().is_some(), "the File page shows Recent");
+    h.state_mut().ui.backstage = false;
+    h.run_steps(2);
+    // Edit brings the ribbon back.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    assert!(h.query_all_by_label("Home").next().is_some(), "Edit shows the ribbon again");
+}
+
+/// #mobile: a viewer's double-tap zooms the page about the finger, twice the page's fit, and
+/// the next double-tap goes back to the zoom the page had. A double-tap while editing still
+/// selects the word.
+#[test]
+fn a_double_tap_zooms_a_reading_page_and_back() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let tap = |h: &mut egui_kittest::Harness<'_, WordApp>, at: egui::Pos2, touch: bool| {
+        if touch {
+            h.event(egui::Event::Touch {
+                device_id: egui::TouchDeviceId(0),
+                id: egui::TouchId(0),
+                phase: egui::TouchPhase::Start,
+                pos: at,
+                force: None,
+            });
+        }
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run_steps(2);
+        if touch {
+            h.event(egui::Event::Touch {
+                device_id: egui::TouchDeviceId(0),
+                id: egui::TouchId(0),
+                phase: egui::TouchPhase::End,
+                pos: at,
+                force: None,
+            });
+        }
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(2);
+    };
+    let at = egui::pos2(195.0, 480.0);
+    let rest = h.state().session.view.zoom;
+    // Reading: the double-tap zooms in.
+    tap(&mut h, at, true);
+    tap(&mut h, at, true);
+    h.run_steps(4);
+    let zoomed = h.state().session.view.zoom;
+    assert!(zoomed > rest, "the double-tap zoomed in: {rest} -> {zoomed}");
+    assert!(h.state().canvas.phone_zoom_out.is_some(), "the rest zoom is kept to restore");
+    // And back out on the next one — after reading a while, so the taps count as a fresh pair.
+    h.run_steps(70);
+    tap(&mut h, at, true);
+    tap(&mut h, at, true);
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.zoom, rest, "the second double-tap restores the zoom");
+    assert!(h.state().canvas.phone_zoom_out.is_none(), "nothing left to restore");
+    // While editing, the same double-tap selects a word instead.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    let sel = h.state().session.sel.clone();
+    tap(&mut h, at, true);
+    tap(&mut h, at, true);
+    h.run_steps(2);
+    assert!(!h.state().session.sel.is_collapsed(), "an editing double-tap selects a word");
+    assert_eq!(h.state().session.view.zoom, rest, "editing never zoomed");
+    let _ = sel;
+}
+
+/// #mobile: a finger held on a word selects it while the page reads, and the grips show for it.
+#[test]
+fn a_long_press_selects_a_word_while_reading() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let at = body_point(&mut h, wordcraft_doc::Pos::body(2, 5));
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::Start, pos: at, force: None });
+    h.event(egui::Event::PointerMoved(at));
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(2);
+    // Held past egui's long-press window (0.8 s) without moving.
+    h.run_steps(55);
+    assert!(!h.state().session.sel.is_collapsed(), "the held finger selected the word");
+    h.event(egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::End, pos: at, force: None });
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    assert!(!h.state().session.sel.is_collapsed(), "the selection stays after the lift");
+}
+
+/// #mobile: a phone opens a document fitted to the page's width — the whole page across the
+/// screen, the reading size a double-tap away — while a desktop window opens at 100%, as it
+/// always did.
+#[test]
+fn a_phone_opens_a_document_fitted_to_the_page_width() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(6);
+    let zoom = h.state().session.view.zoom;
+    assert!(zoom < 0.9, "the page opened fitted to the width: {zoom}");
+    assert!(!h.state().canvas.phone_fit_pending, "the fit happened once");
+    // The double-tap's zoom-in is a reading size from there.
+    let pw = h.state_mut().session.layout().pages.first().map(|p| p.w).unwrap_or(612.0);
+    let vw = h.state().canvas.viewport.map(|r| r.width()).unwrap_or(390.0);
+    let fit = (vw - 56.0) / pw / (96.0 / 72.0);
+    assert!((zoom - fit).abs() < 0.02, "the fit zoom: {zoom} vs {fit}");
+    // A desktop window opens at 100%, never fitted.
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(6);
+    assert_eq!(h.state().session.view.zoom, 1.0, "the desktop opens at 100%");
+}
+
+/// #mobile: the reader's page colour cycles in the status bar — light, sepia, dark — and the
+/// page follows: sepia tints the raster's paper, dark re-renders it dark (Read Mode's › View ›
+/// Page Color, honoured by the phone's page, viewer or editor). A desktop window's status bar
+/// carries no such button, and its Print page never takes the reading colour at all.
+#[test]
+fn the_phone_viewer_cycles_its_page_color() {
+    use egui_kittest::kittest::Queryable;
+    use wordcraft_engine::cmd::view::ReadPageColor;
+
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.read_page_color, ReadPageColor::None, "the page starts light");
+    let opts = |h: &egui_kittest::Harness<'_, WordApp>| {
+        let a = h.state();
+        page_render_options(a, false)
+    };
+    // Light -> sepia: the raster's paper turns sepia, the text keeps its colours.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Light page").click();
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.read_page_color, ReadPageColor::Sepia);
+    assert_eq!(opts(&h).read_paper, Some(wordcraft_render::SEPIA_PAPER));
+    assert!(!opts(&h).dark, "sepia keeps the text's colors");
+    // Sepia -> dark: the page renders dark.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Sepia page").click();
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.read_page_color, ReadPageColor::Inverse);
+    assert!(opts(&h).dark, "the page re-renders dark");
+    // Dark -> light again.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Dark page").click();
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.read_page_color, ReadPageColor::None);
+    assert_eq!(opts(&h).read_paper, None);
+    assert!(!opts(&h).dark, "back on white");
+    // The colour survives Edit and Done: it is the reader's page, whichever mode it is in.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Light page").click();
+    h.run_steps(4);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Edit").click();
+    h.run_steps(3);
+    assert_eq!(opts(&h).read_paper, Some(wordcraft_render::SEPIA_PAPER), "editing keeps the sepia page");
+    // The desktop's status bar carries no such button, and its Print page never takes the
+    // reading colour: that one keeps Word's Switch Modes.
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    assert!(h.query_all_by_label("Light page").next().is_none(), "the desktop status bar has no page color button");
+    h.state_mut().session.run("view.readPageColor", &serde_json::json!({"value": "sepia"})).unwrap();
+    h.run_steps(4);
+    let o = page_render_options(h.state(), false);
+    assert_eq!(o.read_paper, None, "a desktop Print page never takes the reading colour");
+    assert!(!o.dark);
+}
+
+/// #mobile: a swipe is no tap. Two swipes in a row — the way a page is scrolled — land within
+/// the double-tap delay and distance of each other, and counting them as taps made every
+/// second swipe zoom (the page widening and narrowing under scrolling). The chain breaks on a
+/// drag, so swipes never pair; a clean double-tap still zooms.
+#[test]
+fn two_swipes_never_zoom_the_page() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let rest = h.state().session.view.zoom;
+    let touch = |phase: egui::TouchPhase, pos: egui::Pos2| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase,
+        pos,
+        force: None,
+    };
+    let press = |pos: egui::Pos2, down: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: Default::default(),
+    };
+    let swipe = |h: &mut egui_kittest::Harness<'_, WordApp>, from: egui::Pos2, to: egui::Pos2| {
+        h.event(touch(egui::TouchPhase::Start, from));
+        h.event(egui::Event::PointerMoved(from));
+        h.event(press(from, true));
+        h.run_steps(2);
+        h.event(touch(egui::TouchPhase::Move, to));
+        h.event(egui::Event::PointerMoved(to));
+        h.run_steps(2);
+        h.event(touch(egui::TouchPhase::End, to));
+        h.event(press(to, false));
+        h.run_steps(2);
+    };
+    let from = egui::pos2(195.0, 520.0);
+    let to = egui::pos2(195.0, 380.0);
+    swipe(&mut h, from, to);
+    swipe(&mut h, from, to);
+    h.run_steps(4);
+    assert_eq!(h.state().session.view.zoom, rest, "two swipes never zoomed");
+    assert!(h.state().canvas.phone_zoom_out.is_none(), "nothing was zoomed away from");
+    // A clean double-tap — press and release, twice, without a drag — still zooms.
+    let tap = |h: &mut egui_kittest::Harness<'_, WordApp>, at: egui::Pos2| {
+        h.event(touch(egui::TouchPhase::Start, at));
+        h.event(egui::Event::PointerMoved(at));
+        h.event(press(at, true));
+        h.run_steps(2);
+        h.event(touch(egui::TouchPhase::End, at));
+        h.event(press(at, false));
+        h.run_steps(2);
+    };
+    tap(&mut h, from);
+    tap(&mut h, from);
+    h.run_steps(4);
+    assert!(h.state().session.view.zoom > rest, "a real double-tap still zooms: {rest} -> {}", h.state().session.view.zoom);
 }

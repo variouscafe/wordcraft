@@ -313,6 +313,19 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
             crate::rtl::root(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                    // #mobile: while a phone page reads as a viewer the ribbon (with its File tab) is
+                    // away, so the title bar carries File — New, Open and Recent live behind it.
+                    if app.has_document() && crate::responsive::touch_reading(app, ui.ctx()) {
+                        let (r, resp) = ui.allocate_exact_size(vec2(26.0, 24.0), Sense::click());
+                        if resp.hovered() {
+                            ui.painter().rect_filled(r, 4.0, t.hover);
+                        }
+                        icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(16.0, 16.0)), "folder", t.icon, t.accent);
+                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("File")));
+                        if resp.on_hover_text(tl!("File")).clicked() {
+                            let _ = app.run("ui.backstage", json!({"value": true, "page": "home"}));
+                        }
+                    }
                     // AutoSave switch: greyed out, with the reason as its tooltip, when AutoSave can't
                     // cover the document (#196, #176); clicking it then offers Save As where that helps.
                     let block = app.autosave_block();
@@ -391,6 +404,7 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                             ui.add_space(8.0);
                         }
                         search_box(app, ui, control_h);
+                        edit_toggle(app, ui);
                         right_start = if rtl { ui.min_rect().max.x } else { ui.min_rect().min.x };
                     });
                 })
@@ -450,29 +464,34 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
 /// of Full Screen (#1678).
 fn search_box(app: &mut WordApp, ui: &mut Ui, control_h: f32) {
     let t = Tokens::get(ui.ctx());
+    // Phone width: the 260 pt box does not fit beside the Quick Access toolbar, so the search
+    // shrinks to its icon — same click, same search.
+    let phone = crate::responsive::is_phone(ui);
     let rtl = crate::rtl::on();
-    let (r, resp) = ui.allocate_exact_size(vec2(260.0, control_h), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(if phone { vec2(34.0, control_h) } else { vec2(260.0, control_h) }, Sense::click());
     let ph = tl!("Search commands and help");
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, ph));
     ui.painter().rect(r, 6.0, if resp.hovered() { t.input } else { t.ribbon }, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
     icons::paint(
         ui.painter(),
-        Rect::from_center_size(pos2(crate::rtl::lead_x(rtl, r, 16.0), r.center().y), vec2(16.0, 16.0)),
+        Rect::from_center_size(pos2(crate::rtl::lead_x(rtl, r, if phone { r.width() / 2.0 } else { 16.0 }), r.center().y), vec2(16.0, 16.0)),
         "search",
         t.text_dim,
         t.accent,
     );
     let pfont = TypeRung::Control.regular();
     let ptrack = TypeRung::Control.tracking();
-    paint_text(
-        ui.painter(),
-        pos2(crate::rtl::lead_x(rtl, r, 30.0), r.center().y - TypeRung::Control.line_height() / 2.0),
-        crate::rtl::lead_top(rtl),
-        ph,
-        &pfont,
-        ptrack,
-        t.text_dim,
-    );
+    if !phone {
+        paint_text(
+            ui.painter(),
+            pos2(crate::rtl::lead_x(rtl, r, 30.0), r.center().y - TypeRung::Control.line_height() / 2.0),
+            crate::rtl::lead_top(rtl),
+            ph,
+            &pfont,
+            ptrack,
+            t.text_dim,
+        );
+    }
     if app.ui.keytips == crate::keytips::Phase::Tabs {
         app.keytip_rects.push((r, crate::keytips::SEARCH_LETTER.to_string()));
     }
@@ -482,6 +501,55 @@ fn search_box(app: &mut WordApp, ui: &mut Ui, control_h: f32) {
     };
     if resp.on_hover_text(tip).clicked() {
         let _ = app.run("tools.search", json!({}));
+    }
+}
+
+/// The phone title bar's Edit/Done button (#mobile): a phone-width page opens as a viewer —
+/// touching it never raises the soft keyboard over the text being read. Edit switches the page
+/// to editing and hands it the keyboard (`CanvasState::want_focus`); Done drops it back to
+/// reading, and the canvas gives the keyboard up.
+fn edit_toggle(app: &mut WordApp, ui: &mut Ui) {
+    if !crate::responsive::is_phone(ui) || !app.has_document() {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    let editing = app.canvas.phone_editing;
+    let label = if editing { tl!("Done") } else { tl!("Edit") };
+    let font = TypeRung::Control.medium();
+    let track = TypeRung::Control.tracking();
+    let color = if editing { t.text } else { t.on_accent };
+    let text_w = text_width(ui.painter(), label, &font, track, color);
+    let (r, resp) = ui.allocate_exact_size(vec2(24.0 + text_w + 12.0, 22.0), Sense::click());
+    if editing {
+        // Editing ends with a quieter outline, the way Word's phone app shows it.
+        ui.painter().rect(
+            r,
+            11.0,
+            if resp.hovered() { t.hover } else { egui::Color32::TRANSPARENT },
+            Stroke::new(1.0, t.border),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        ui.painter().rect(r, 11.0, if resp.hovered() { t.accent_text } else { t.accent }, Stroke::NONE, egui::StrokeKind::Inside);
+        icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 12.0, r.center().y), vec2(14.0, 14.0)), "pencil", t.on_accent, t.on_accent);
+    }
+    paint_text(
+        ui.painter(),
+        pos2(r.min.x + 24.0, r.center().y - TypeRung::Control.line_height() / 2.0),
+        Align2::LEFT_TOP,
+        label,
+        &font,
+        track,
+        color,
+    );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let tip = if editing { tl!("Finish editing") } else { tl!("Edit the document") };
+    if resp.on_hover_text(tip).clicked() {
+        app.canvas.phone_editing = !editing;
+        if !editing {
+            // The keyboard follows the focus next frame; a page not yet drawn must not take it.
+            app.canvas.want_focus = true;
+        }
     }
 }
 
@@ -586,6 +654,10 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
             crate::rtl::root(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing = vec2(14.0, 0.0);
+                    // The phone bar sheds its desktop-only items (language, zoom slider, Focus): the
+                    // row is 26 pt tall and would otherwise run its right controls under the left
+                    // ones. Page, word count and the zoom/view controls stay.
+                    let phone = crate::responsive::is_phone(ui);
                     let l = app.session.layout();
                     let page = if let Some(p) = app.canvas.viewed_page {
                         // The page in view (#3880), as the scrollbar's tip names it.
@@ -672,11 +744,13 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                         lang.clone()
                     };
                     let tip = dictionary_problem(&lang, &unreadable, missing).unwrap_or_else(|| tl!("Language").to_string());
-                    let resp = st(ui, &shown).on_hover_text(tip);
-                    crate::rtl::menu(&resp).show(|ui| {
-                        ui.set_min_width(200.0);
-                        crate::rtl::root(ui, |ui| crate::ribbon::language_menu(ui, app));
-                    });
+                    if !phone {
+                        let resp = st(ui, &shown).on_hover_text(tip);
+                        crate::rtl::menu(&resp).show(|ui| {
+                            ui.set_min_width(200.0);
+                            crate::rtl::root(ui, |ui| crate::ribbon::language_menu(ui, app));
+                        });
+                    }
                     if app.session.doc.settings.track_changes {
                         st(ui, tl!("Track Changes: On"));
                     }
@@ -748,17 +822,21 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                         if small_icon(ui, near.0, tl!(near.1)) {
                             zoom_step(app, near.2);
                         }
-                        // Reading zoom changes only reading presentation, never the normal view zoom.
-                        let mut v = if reading { app.session.view.read_zoom } else { app.canvas.scale / crate::canvas::PX_PER_PT };
-                        let slider = egui::Slider::new(&mut v, if reading { 0.75..=1.5 } else { 0.1..=5.0 }).logarithmic(!reading).show_value(false);
-                        ui.spacing_mut().slider_width = 110.0;
-                        let response = ui.add(slider);
-                        response.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::Slider, ui.is_enabled(), if reading { tl!("Text Size") } else { tl!("Zoom") })
-                        });
-                        if response.changed() {
-                            let command = if reading { "view.readTextSize" } else { "view.zoom" };
-                            let _ = app.run(command, json!({"value": (v * 100.0).round()}));
+                        // The slider is desktop chrome: the phone bar keeps the −/+ icons.
+                        if !phone {
+                            // Reading zoom changes only reading presentation, never the normal view zoom.
+                            let mut v = if reading { app.session.view.read_zoom } else { app.canvas.scale / crate::canvas::PX_PER_PT };
+                            let slider =
+                                egui::Slider::new(&mut v, if reading { 0.75..=1.5 } else { 0.1..=5.0 }).logarithmic(!reading).show_value(false);
+                            ui.spacing_mut().slider_width = 110.0;
+                            let response = ui.add(slider);
+                            response.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::Slider, ui.is_enabled(), if reading { tl!("Text Size") } else { tl!("Zoom") })
+                            });
+                            if response.changed() {
+                                let command = if reading { "view.readTextSize" } else { "view.zoom" };
+                                let _ = app.run(command, json!({"value": (v * 100.0).round()}));
+                            }
                         }
                         if small_icon(ui, far.0, tl!(far.1)) {
                             zoom_step(app, far.2);
@@ -783,32 +861,65 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                                 let _ = app.run(id, json!({}));
                             }
                         }
-                        ui.add_space(8.0);
-                        let focus = tl!("Focus");
-                        let focus_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(focus.to_string(), regular(11.5), t.text_dim).size().x);
-                        let (r, resp) = ui.allocate_exact_size(vec2((focus_w + 26.0).max(56.0), 20.0), Sense::click());
-                        // The Focus button is the last of the controls, so it is the leftmost one: the
-                        // message has to stop before it (#2402).
-                        controls_left = if rtl { r.max.x } else { r.min.x };
-                        if resp.hovered() {
-                            ui.painter().rect_filled(r, 3.0, t.hover);
+                        // #mobile: the reader's page colour — light, sepia, dark — in one button
+                        // that cycles (Read Mode's own › View › Page Color, which the phone's page
+                        // honours too, viewer or editor). A desktop window reaches page colour in
+                        // the ribbon, as it always has.
+                        if phone && !read {
+                            use wordcraft_engine::cmd::view::ReadPageColor;
+                            let color = app.session.view.read_page_color;
+                            let (icon, name, next) = match color {
+                                ReadPageColor::None => ("sun", tl!("Light page"), "sepia"),
+                                ReadPageColor::Sepia => ("pageSepia", tl!("Sepia page"), "inverse"),
+                                ReadPageColor::Inverse => ("moon", tl!("Dark page"), "none"),
+                            };
+                            let on = color != ReadPageColor::None;
+                            let (r, resp) = ui.allocate_exact_size(vec2(22.0, 20.0), Sense::click());
+                            if on {
+                                ui.painter().rect_filled(r, 3.0, t.checked);
+                            } else if resp.hovered() {
+                                ui.painter().rect_filled(r, 3.0, t.hover);
+                            }
+                            icons::paint(ui.painter(), r.shrink(3.0), icon, t.icon, t.accent);
+                            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, name));
+                            if resp.on_hover_text(name).clicked() {
+                                let _ = app.run("view.readPageColor", json!({"value": next}));
+                            }
                         }
-                        let icon_at = pos2(crate::rtl::lead_left(rtl, r, 2.0, 16.0), r.min.y + 2.0);
-                        icons::paint(ui.painter(), Rect::from_min_size(icon_at, vec2(16.0, 16.0)), "focus", t.icon, t.accent);
-                        let ffont = TypeRung::Caption.regular();
-                        let ftrack = TypeRung::Caption.tracking();
-                        paint_text(
-                            ui.painter(),
-                            pos2(crate::rtl::lead_x(rtl, r, 22.0), r.center().y - TypeRung::Caption.line_height() / 2.0),
-                            crate::rtl::lead_top(rtl),
-                            focus,
-                            &ffont,
-                            ftrack,
-                            t.text_dim,
-                        );
-                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, focus));
-                        if resp.clicked() {
-                            let _ = app.run("view.focus", json!({}));
+                        // The message has to stop before it (#2402). It is desktop chrome; the phone
+                        // bar drops it, and the message then stops at whatever control is leftmost.
+                        if !phone {
+                            ui.add_space(8.0);
+                            let focus = tl!("Focus");
+                            let focus_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(focus.to_string(), regular(11.5), t.text_dim).size().x);
+                            let (r, resp) = ui.allocate_exact_size(vec2((focus_w + 26.0).max(56.0), 20.0), Sense::click());
+                            controls_left = if rtl { r.max.x } else { r.min.x };
+                            if resp.hovered() {
+                                ui.painter().rect_filled(r, 3.0, t.hover);
+                            }
+                            let icon_at = pos2(crate::rtl::lead_left(rtl, r, 2.0, 16.0), r.min.y + 2.0);
+                            icons::paint(ui.painter(), Rect::from_min_size(icon_at, vec2(16.0, 16.0)), "focus", t.icon, t.accent);
+                            let ffont = TypeRung::Caption.regular();
+                            let ftrack = TypeRung::Caption.tracking();
+                            paint_text(
+                                ui.painter(),
+                                pos2(crate::rtl::lead_x(rtl, r, 22.0), r.center().y - TypeRung::Caption.line_height() / 2.0),
+                                crate::rtl::lead_top(rtl),
+                                focus,
+                                &ffont,
+                                ftrack,
+                                t.text_dim,
+                            );
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, focus));
+                            if resp.clicked() {
+                                let _ = app.run("view.focus", json!({}));
+                            }
+                        }
+                        // Without the Focus button (phone width), the row's cursor sits just beside
+                        // the control that drew last — the row's own drawing direction decides which
+                        // edge the message must stop at.
+                        if !controls_left.is_finite() {
+                            controls_left = if rtl { ui.cursor().max.x } else { ui.cursor().min.x };
                         }
                     });
                     if let Some((msg, at)) = &app.status_msg

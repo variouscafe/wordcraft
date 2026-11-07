@@ -127,6 +127,11 @@ impl WordApp {
         if self.file_browser.open.is_some() {
             return;
         }
+        // Phone-width reading (#mobile): the page is a viewer, so a click on the chrome must not
+        // hand the keyboard to it — the soft keyboard would cover the text being read.
+        if crate::responsive::touch_reading(self, ctx) {
+            return;
+        }
         let Some(pos) = ctx.input(|i| if i.pointer.any_click() { i.pointer.interact_pos() } else { None }) else { return };
         // The ribbon dropped over the page in Focus (#1678) is chrome, though it lies over the page.
         let on_focus_ribbon = self.focus_ribbon && ctx.layer_id_at(pos).is_some_and(|l| l.id == egui::Id::unique("focus_ribbon"));
@@ -174,5 +179,93 @@ pub(crate) fn control_click_as_secondary(events: &mut [egui::Event], held: &mut 
                 *held = false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, Pos2};
+
+    /// egui applies a `PointerButton`'s own position to `interact_pos`, so a touch-style
+    /// press — which arrives with no preceding `PointerMoved` — must still hit-test and click
+    /// where it landed. These pin that, for the sequences eframe's web backend delivers
+    /// (review of #5050 questioned it; these are the proof it holds).
+    #[test]
+    fn a_press_without_any_preceding_move_still_clicks_a_button() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+            |ui: &mut egui::Ui, clicked: &mut bool| {
+                *clicked |= ui.button("Tap me").clicked();
+            },
+            false,
+        );
+        h.run();
+        let rect = h.get_by_role_and_label(egui::accesskit::Role::Button, "Tap me").rect();
+        let pos = Pos2::new(rect.center().x, rect.center().y);
+        for pressed in [true, false] {
+            h.event(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.run();
+        }
+        assert!(*h.state(), "a touch-style press and release with no move must click");
+    }
+
+    /// The control for the test above: the same sequence with a preceding move (what
+    /// `ensure_presses_are_preceded_by_moves` inserts, and what kittest's own click does).
+    #[test]
+    fn a_press_with_a_preceding_move_clicks_a_button() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+            |ui: &mut egui::Ui, clicked: &mut bool| {
+                *clicked |= ui.button("Tap me").clicked();
+            },
+            false,
+        );
+        h.run();
+        let rect = h.get_by_role_and_label(egui::accesskit::Role::Button, "Tap me").rect();
+        let pos = Pos2::new(rect.center().x, rect.center().y);
+        h.event(Event::PointerMoved(pos));
+        h.run();
+        for pressed in [true, false] {
+            h.event(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.run();
+        }
+        assert!(*h.state(), "with a preceding move the click must fire");
+    }
+
+    /// Sanity: kittest's own click() must click (it hover-moves first, then presses).
+    #[test]
+    fn kittest_own_click_clicks_a_button() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+            |ui: &mut egui::Ui, clicked: &mut bool| {
+                *clicked |= ui.button("Tap me").clicked();
+            },
+            false,
+        );
+        h.run();
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Tap me").click();
+        h.run();
+        assert!(*h.state(), "kittest's own click must work in this harness");
+    }
+
+    /// The exact web batching: eframe-web can deliver a touch press and its release in ONE
+    /// pass (no repaint ran between touchstart and touchend), with no move at all.
+    #[test]
+    fn a_press_and_release_in_one_pass_without_a_move_clicks_a_button() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+            |ui: &mut egui::Ui, clicked: &mut bool| {
+                *clicked |= ui.button("Tap me").clicked();
+            },
+            false,
+        );
+        h.run();
+        let rect = h.get_by_role_and_label(egui::accesskit::Role::Button, "Tap me").rect();
+        let pos = Pos2::new(rect.center().x, rect.center().y);
+        for pressed in [true, false] {
+            h.event(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+        h.run();
+        assert!(*h.state(), "a same-pass press+release with no move must click");
     }
 }

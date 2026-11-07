@@ -244,11 +244,16 @@ pub(super) fn page_render_options(app: &WordApp, dim_body: bool) -> wordcraft_re
     opts.display.revisions = app.session.prefs.markup.clone();
     opts.dark = dark_page(app);
     opts.dark_paper = wordcraft_render::DARK_PAPER;
-    // In Read Mode the Page color sets the paper.
-    if app.session.view.read_mode {
-        use wordcraft_engine::cmd::view::ReadPageColor;
-        let color = app.session.view.read_page_color;
-        opts.read_paper = Some(if color == ReadPageColor::Sepia { wordcraft_render::SEPIA_PAPER } else { wordcraft_doc::props::Rgb::WHITE });
+    // The reading page colour in effect here: Read Mode decides from the session itself, and
+    // the phone's page is the one `prepare_view` stamped this frame (#mobile). Sepia tints
+    // the paper, inverse darkens the page. In Read Mode it decides the paper and Switch Modes
+    // is ignored, as in Word; every other Print page never sees a reading colour at all.
+    use wordcraft_engine::cmd::view::ReadPageColor;
+    let paper = if app.session.view.read_mode { app.session.view.read_page_color } else { app.canvas.paper };
+    if app.session.view.read_mode || paper != ReadPageColor::None {
+        opts.read_paper = Some(if paper == ReadPageColor::Sepia { wordcraft_render::SEPIA_PAPER } else { wordcraft_doc::props::Rgb::WHITE });
+        opts.dark =
+            if app.session.view.read_mode { paper == ReadPageColor::Inverse } else { app.session.view.dark_mode || paper == ReadPageColor::Inverse };
     }
     opts.display.dim_header = !dim_body;
     opts.display.dim_body = dim_body;
