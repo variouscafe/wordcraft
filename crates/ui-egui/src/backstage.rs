@@ -143,7 +143,10 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 let ink = if on { egui::Color32::WHITE } else { egui::Color32::from_white_alpha(110) };
                 icons::paint(
                     ui.painter(),
-                    Rect::from_center_size(pos2(crate::rtl::lead_x(rtl, r, if narrow { r.width() / 2.0 } else { 31.0 }), r.center().y), vec2(18.0, 18.0)),
+                    Rect::from_center_size(
+                        pos2(crate::rtl::lead_x(rtl, r, if narrow { r.width() / 2.0 } else { 31.0 }), r.center().y),
+                        vec2(18.0, 18.0),
+                    ),
                     icon,
                     ink,
                     ink,
@@ -651,7 +654,13 @@ fn open_list(app: &mut WordApp, ui: &mut Ui) {
         );
         let side = crate::rtl::lead_center(rtl);
         ui.painter().text(pos2(crate::rtl::lead_x(rtl, r, 40.0), r.min.y + 13.0), side, crate::i18n::isolate(name), medium(13.0), t.text);
-        ui.painter().text(pos2(crate::rtl::lead_x(rtl, r, 40.0), r.min.y + 29.0), side, crate::i18n::isolate_path(kept.as_deref().unwrap_or(p)), regular(11.0), t.text_dim);
+        ui.painter().text(
+            pos2(crate::rtl::lead_x(rtl, r, 40.0), r.min.y + 29.0),
+            side,
+            crate::i18n::isolate_path(kept.as_deref().unwrap_or(p)),
+            regular(11.0),
+            t.text_dim,
+        );
         if resp.clicked() {
             let failed = open_recent(app, p).err();
             ui.ctx().data_mut(|d| d.insert_temp(open_error_id(), failed.unwrap_or_default()));
