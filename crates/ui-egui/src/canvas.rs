@@ -175,6 +175,11 @@ pub struct CanvasState {
     /// #mobile: a drag-scroll underway on the page: the finger pressed on it, or the fling it
     /// left behind at lift (see [`viewer_drag_scroll`]). Reset for every document.
     pub(crate) phone_drag: Option<PhoneDrag>,
+    /// #mobile: the session has already applied the phone's ruler default — the rulers start
+    /// hidden on a phone-width viewport (tab-stop editing is a pointer affair, and the row buys
+    /// reading space). Once per session, so a deliberate View › Show › Ruler stays on through
+    /// resizes and rotation; a window the mouse uses never crosses the phone width.
+    pub(crate) phone_ruler_defaulted: bool,
     /// The reading page colour in effect on the page shown this frame (stamped by
     /// [`prepare_view`]; see [`crate::responsive::reading_page_color`]). `None` wherever the
     /// surface isn't read on — every desktop Print page.
@@ -430,6 +435,7 @@ impl Default for CanvasState {
             phone_zoom_out: None,
             phone_fit_pending: true,
             phone_drag: None,
+            phone_ruler_defaulted: false,
             paper: wordcraft_engine::cmd::view::ReadPageColor::None,
             phone_restore: None,
             position_saved: None,
@@ -568,6 +574,13 @@ fn prepare_view(app: &mut WordApp, ui: &Ui, full: Rect, layout: &DocLayout) -> C
         let p = page_render_options(app, false).blank_paper();
         Color32::from_rgb(p.0, p.1, p.2)
     };
+    // A phone-width viewport's rulers start hidden (#mobile): once per session, before the frame
+    // that draws them, so the first phone frame never flashes the row. A later View ›
+    // Show › Ruler works and stays on (the once-marker doesn't re-hide it).
+    if !app.canvas.phone_ruler_defaulted && crate::responsive::is_phone(ui) && app.session.view.ruler {
+        app.canvas.phone_ruler_defaulted = true;
+        let _ = app.run("view.ruler", json!({"value": false}));
+    }
     let show_ruler = app.session.view.ruler
         && app.session.view.mode == wordcraft_layout::ViewMode::Print
         && !read_mode

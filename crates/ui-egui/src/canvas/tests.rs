@@ -531,6 +531,44 @@ fn ruler_margin_drags_on_even_mirrored_pages_move_the_visible_edge() {
     assert_eq!(margin_drag(MarginEdge::Top, 50.0, &sect, true), (MarginEdge::Top, dragged_margin(MarginEdge::Top, 50.0, &sect)));
 }
 
+/// #mobile: a phone-width viewport starts with the rulers hidden — tab-stop editing is a
+/// pointer affair, and the row buys reading space. Once per session: a deliberate
+/// View › Show › Ruler works afterwards and is never re-hidden, and a desktop-width window
+/// keeps the rulers' on default.
+#[test]
+fn a_phone_width_viewport_starts_without_the_rulers() {
+    let a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Reading on a phone.")), Default::default());
+    let mut h: H = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(0.25).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        a,
+    );
+    h.run_steps(6);
+    assert!(!h.state().session.view.ruler, "the phone viewport starts with the rulers hidden");
+    assert!(h.state().canvas.phone_ruler_defaulted, "the default applies once");
+    // A deliberate View › Show › Ruler still shows them, and the default doesn't re-hide them.
+    h.state_mut().run("view.ruler", json!({"value": true})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().session.view.ruler, "a deliberate toggle stays on");
+
+    // A desktop-width window keeps the rulers on: the default is the phone's alone.
+    let wide = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Editing at a desk.")), Default::default());
+    let mut h: H = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(0.25).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        wide,
+    );
+    h.run_steps(6);
+    assert!(h.state().session.view.ruler, "a desktop window keeps the rulers on");
+    assert!(!h.state().canvas.phone_ruler_defaulted);
+}
+
 /// Dragging a margin edge on the vertical ruler leaves the view where it is. Each step of the
 /// drag runs `layout.margins`, which brought the caret back into view: with the caret off
 /// screen (the bottom margin is far from the text at the top) the page slid under the pointer
