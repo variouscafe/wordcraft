@@ -5918,3 +5918,80 @@ fn two_finger_scrolling_keeps_the_page_size() {
     let after = size(&h);
     assert!(after.0 > before.0, "a pinch zooms the page in: {} -> {}", before.0, after.0);
 }
+
+/// #mobile dogfooding: a two-finger scroll whose start is staggered — one finger travelling
+/// briskly before the other follows, as real fingers land one after the other — grew and shrank
+/// the page, because the leading finger widened the distance past the pinch latch before the
+/// common travel reached its own. The gesture is now named by what the fingers each do: the
+/// second finger following within the patience window names a scroll, which never zooms, and
+/// the page still scrolls (the first finger's drag carries it).
+#[test]
+fn a_staggered_two_finger_scroll_keeps_the_page_size() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), Default::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let touch = |id: u64, phase: egui::TouchPhase, pos: egui::Pos2| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(id),
+        phase,
+        pos,
+        force: None,
+    };
+    let size = |h: &egui_kittest::Harness<'_, WordApp>| (h.state().session.view.zoom, h.state().canvas.page_rects.first().map(|r| r.width()));
+    let before = size(&h);
+
+    let pair = |h: &mut egui_kittest::Harness<'_, WordApp>, a: egui::Event, b: egui::Event, p: egui::Pos2| {
+        h.input_mut().events.push(a);
+        h.input_mut().events.push(b);
+        h.input_mut().events.push(egui::Event::PointerMoved(p));
+        h.step();
+    };
+    // Finger A touches first (the primary pointer follows it, as browsers report), then B lands
+    // beside it: the two-finger gesture starts.
+    let (mut a, mut b) = (egui::pos2(150.0, 540.0), egui::pos2(230.0, 700.0));
+    h.event(touch(0, egui::TouchPhase::Start, a));
+    h.event(egui::Event::PointerMoved(a));
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(2);
+    pair(&mut h, touch(0, egui::TouchPhase::Start, a), touch(1, egui::TouchPhase::Start, b), a);
+    h.run_steps(2);
+
+    // The lead: A travels up briskly while B hesitates — the start that used to name a pinch.
+    for _ in 0..2 {
+        a = egui::pos2(a.x, a.y - 17.0);
+        pair(&mut h, touch(0, egui::TouchPhase::Move, a), touch(1, egui::TouchPhase::Move, b), a);
+        h.run_steps(2);
+        assert_eq!(size(&h), before, "a leading finger does not zoom the page");
+    }
+    // Travel together: B has followed, the fingers going up the screen with the distance easing
+    // back as B catches up — the whole way a scroll, and the page follows the first finger.
+    for i in 0..10 {
+        a = egui::pos2(a.x, a.y - 25.0);
+        b = egui::pos2(b.x, b.y - 25.0 + if i < 4 { 2.0 } else { 0.0 });
+        pair(&mut h, touch(0, egui::TouchPhase::Move, a), touch(1, egui::TouchPhase::Move, b), a);
+        h.run_steps(2);
+        assert_eq!(size(&h), before, "frame {i} of the staggered scroll keeps the page size");
+    }
+    let scrolled = h.state().canvas.scroll_offset.y;
+    assert!(scrolled > 0.0, "the staggered scroll still scrolls the page: {scrolled}");
+    // The hand settles: B drifts back toward where it started, the fingers closing. A pinch
+    // would zoom out here; a named scroll keeps its name until the fingers lift.
+    for i in 0..6 {
+        a = egui::pos2(a.x, a.y - 12.0);
+        b = egui::pos2(b.x, b.y - 12.0 - 8.0);
+        pair(&mut h, touch(0, egui::TouchPhase::Move, a), touch(1, egui::TouchPhase::Move, b), a);
+        h.run_steps(2);
+        assert_eq!(size(&h), before, "closing frame {i} of the staggered scroll keeps the page size");
+    }
+    pair(&mut h, touch(0, egui::TouchPhase::End, a), touch(1, egui::TouchPhase::End, b), a);
+    h.run_steps(4);
+    assert_eq!(size(&h), before, "the staggered scroll ends with the page size it began at");
+}

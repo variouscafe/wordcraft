@@ -16,7 +16,8 @@
 
 #[cfg(test)]
 use egui::MouseWheelSource;
-use egui::{Event, InputOptions, Modifiers, MouseWheelUnit, TouchPhase, Vec2};
+use egui::{Event, InputOptions, Modifiers, MouseWheelUnit, Pos2, TouchPhase, Vec2};
+use std::collections::BTreeMap;
 
 /// Screen points one mouse-wheel notch scrolls at 100% zoom: about three lines of body text,
 /// like other desktop apps (egui's default is 40).
@@ -55,12 +56,39 @@ const ZOOM_STEP: f32 = 0.1;
 const ZOOM_STEP_IDLE: f64 = 0.75;
 /// Most zoom steps taken from one frame's input (the zoom itself is clamped to 10–500%).
 const MAX_ZOOM_STEPS: f32 = 64.0;
-/// How far two fingers must travel together before their gesture is a two-finger scroll, which
-/// never zooms (screen points).
-const TOUCH_PAN_LATCH: f32 = 10.0;
-/// How far two fingers must close or spread, as the natural log of their distance's ratio, before
-/// their gesture is a pinch, which zooms the page.
-const TOUCH_PINCH_LATCH: f32 = 0.08;
+/// How far a two-finger gesture's fingers must travel together, as a share of their separation,
+/// before the gesture is named a two-finger scroll, which never zooms.
+const TOUCH_PAN_LATCH: f32 = 0.1;
+/// How far the fingers must close or spread, as the natural log of their distance's ratio, with
+/// both of them moving along the line through them, before the gesture is named a pinch.
+const TOUCH_PINCH_LATCH: f32 = 0.06;
+/// The same closing or spreading, for a pinch one finger of which stays planted where it
+/// landed: the moving finger alone can name the gesture, but only once [`TOUCH_PLANT_PATIENCE`]
+/// has passed — a scroll's second finger following a staggered start looks, until it moves,
+/// exactly like this (#mobile dogfooding: a leading finger named the gesture a pinch, and the
+/// page grew and shrank the whole way down).
+const TOUCH_PLANTED_LATCH: f32 = 0.08;
+/// How long a planted-finger pinch waits to be named (seconds): a scroll whose fingers land one
+/// after the other resolves within this — its second finger moves — so the wait costs a planted
+/// pinch a beat of responsiveness and saves every staggered scroll from being named a pinch.
+const TOUCH_PLANT_PATIENCE: f32 = 0.15;
+/// A finger whose travel from its landing is less than this (screen points) is planted.
+const TOUCH_PLANTED_R: f32 = 3.0;
+/// On-axis motion (screen points) below which a finger counts as not moving along the line
+/// through the pair — jitter, not intent.
+const TOUCH_AXIS_DEAD: f32 = 1.0;
+/// The lesser finger's on-axis motion must be at least this share of the greater's for the
+/// pair to count as closing or spreading together.
+const TOUCH_AXIS_SHARE: f32 = 0.2;
+/// A separation (the fingers' average distance from their centre, screen points) below which
+/// the gesture is too small to name.
+const TOUCH_MIN_SEP: f32 = 8.0;
+/// While a finger is planted and the distance has changed this much, naming a scroll waits for
+/// the pinch decision instead: half the planted pinch's latch, where the two readings meet.
+const TOUCH_PINCH_PENDING: f32 = TOUCH_PLANTED_LATCH * 0.5;
+/// A frame whose separation jumps outside this band of the last frame's is a finger joining,
+/// lifting or teleporting, not a pinch: it names nothing and zooms nothing.
+const TOUCH_SEP_JUMP: f32 = 2.0;
 
 /// Kinetic scrolling for touchpads: tracks the scroll velocity while the fingers move and keeps
 /// scrolling with exponentially decaying speed after they lift. Time-based, so frame-rate
@@ -165,15 +193,25 @@ pub struct CanvasScroll {
     /// input time it last grew. Only used with animation effects off.
     zoom_pending: f32,
     zoom_time: f64,
-    /// A two-finger gesture in flight, named once at its start and keeping that name until the
-    /// fingers lift (#mobile): how far they have travelled together and how far they have closed
-    /// or spread (natural logarithm of the ratio). `touch_zooming` is `Some` once either latch
-    /// ([`TOUCH_PAN_LATCH`], [`TOUCH_PINCH_LATCH`]) names the gesture; `pinch_spent` marks the
-    /// frame the pinch's already-travelled part was paid out.
+    /// A two-finger gesture in flight, named once and keeping that name until the fingers lift
+    /// (#mobile). `touch_pan` is the fingers' travel together so far, as a share of their
+    /// separation; `touch_pinch` their closing or spreading so far (natural log of the ratio).
+    /// `touch_zooming` is `Some` once the gesture is named — a scroll (`false`) never zooms, a
+    /// pinch (`true`) does — and `pinch_spent` marks the frame the pinch's already-travelled
+    /// part was paid out. The fingers themselves are tracked in `touch_fingers` ((landing, last
+    /// frame, now) each): whether each has left its landing, and whether the pair moved along
+    /// their own line, is what tells a staggered scroll from a planted pinch — the gesture's
+    /// totals alone cannot, for a leading finger widens the distance exactly as a pinch's moving
+    /// finger does while the other stays planted.
     touch_pan: f32,
     touch_pinch: f32,
     touch_zooming: Option<bool>,
     pinch_spent: bool,
+    touch_fingers: BTreeMap<egui::TouchId, (egui::Pos2, egui::Pos2, egui::Pos2)>,
+    /// Last frame's separation ([`Self::finger_spread`]), and the finger set the gesture runs
+    /// with: a finger joining or lifting resets the separation, so it zooms nothing.
+    touch_sep: f32,
+    touch_set: u64,
 }
 
 impl CanvasScroll {
@@ -292,6 +330,9 @@ impl CanvasScroll {
         self.touch_pinch = 0.0;
         self.touch_zooming = None;
         self.pinch_spent = false;
+        self.touch_fingers.clear();
+        self.touch_sep = 0.0;
+        self.touch_set = 0;
         if animate {
             self.zoom_pending = 0.0;
             return input.zoom_delta();
@@ -325,24 +366,51 @@ impl CanvasScroll {
     /// Two fingers on a touch screen: a pinch zooms the page, a two-finger scroll (the fingers
     /// travelling together, the way a page is scrolled on a phone) never does. Their distance
     /// ratio alone cannot tell the two apart — the distance between travelling fingers is never
-    /// quite constant, so a two-finger scroll used to zoom the page wider and narrower the whole
-    /// way (#mobile dogfooding: scrolling grew and shrank the page). Whichever latch is reached
-    /// first names the gesture, and it keeps that name until the fingers lift; a pinch the system
-    /// itself reports as a pinch (an `Event::Zoom` beside the touches) is named at once.
+    /// quite constant, and a scroll whose start is staggered (one finger travelling before the
+    /// other follows, as real fingers land one after the other) widens the distance exactly as a
+    /// pinch's moving finger does while the other stays planted (#mobile dogfooding: both used
+    /// to zoom the page wider and narrower the whole way down). So the fingers themselves are
+    /// tracked, and the gesture is named by what they each do:
+    /// - the system calling it a pinch (an `Event::Zoom` beside the touches) names it at once;
+    /// - both fingers closing or spreading along the line through them names a pinch;
+    /// - one finger planted while the other keeps closing or spreading past
+    ///   [`TOUCH_PLANTED_LATCH`] names a pinch, but only after [`TOUCH_PLANT_PATIENCE`], the
+    ///   window in which a staggered scroll's second finger follows;
+    /// - the fingers travelling together past [`TOUCH_PAN_LATCH`] names a scroll, which a
+    ///   pending pinch decision holds off naming.
+    ///
+    /// The name, once given, is kept until the fingers lift.
     fn touch_zoom(&mut self, input: &egui::InputState, mt: &egui::MultiTouchInfo) -> f32 {
-        if mt.translation_delta.is_finite() {
-            self.touch_pan = (self.touch_pan + mt.translation_delta.length()).min(1e6);
+        self.track_fingers(input);
+        let sep = self.finger_spread();
+        let set = self.finger_set();
+        let changed_set = set != self.touch_set;
+        self.touch_set = set;
+        let jump = !sep.is_finite()
+            || sep < TOUCH_MIN_SEP
+            || self.touch_sep < TOUCH_MIN_SEP
+            || !(sep > self.touch_sep / TOUCH_SEP_JUMP && sep < self.touch_sep * TOUCH_SEP_JUMP);
+        let delta = if changed_set || jump { 0.0 } else { (sep / self.touch_sep).ln() };
+        if sep.is_finite() {
+            self.touch_sep = sep;
         }
-        if mt.zoom_delta.is_finite() && mt.zoom_delta > 0.0 {
-            self.touch_pinch = (self.touch_pinch + mt.zoom_delta.ln()).clamp(-8.0, 8.0);
+        if mt.translation_delta.is_finite() && sep >= TOUCH_MIN_SEP {
+            self.touch_pan = (self.touch_pan + mt.translation_delta.length() / sep).min(1e6);
+        }
+        if delta.is_finite() {
+            self.touch_pinch = (self.touch_pinch + delta).clamp(-8.0, 8.0);
         }
         if self.touch_zooming.is_none() {
-            self.touch_zooming = if self.touch_pan >= TOUCH_PAN_LATCH {
-                Some(false)
-            } else if self.touch_pinch.abs() >= TOUCH_PINCH_LATCH
-                || input.events.iter().any(|e| matches!(e, Event::Zoom(f) if f.is_finite() && *f > 0.0))
-            {
+            let age = (input.time - mt.start_time).max(0.0);
+            let system = input.events.iter().any(|e| matches!(e, Event::Zoom(f) if f.is_finite() && *f > 0.0));
+            let planted = self.finger_planted();
+            let pinch = system
+                || (self.touch_pinch.abs() >= TOUCH_PINCH_LATCH && self.fingers_on_axis())
+                || (self.touch_pinch.abs() >= TOUCH_PLANTED_LATCH && planted && age >= f64::from(TOUCH_PLANT_PATIENCE) && delta.abs() >= 0.002);
+            self.touch_zooming = if pinch {
                 Some(true)
+            } else if self.touch_pan >= TOUCH_PAN_LATCH && !(planted && self.touch_pinch.abs() >= TOUCH_PINCH_PENDING) {
+                Some(false)
             } else {
                 None
             };
@@ -358,6 +426,100 @@ impl CanvasScroll {
             Some(true) => input.zoom_delta(),
             Some(false) | None => 1.0,
         }
+    }
+
+    /// The touches this frame became of the gesture's fingers: (landing, last frame, now). A
+    /// finger the events don't mention keeps its places; one that lifts is dropped, and the
+    /// gesture ends with it when fewer than two remain.
+    fn track_fingers(&mut self, input: &egui::InputState) {
+        for e in &input.events {
+            if let Event::Touch { id, phase, pos, .. } = e {
+                if !pos.is_finite() {
+                    continue;
+                }
+                match phase {
+                    TouchPhase::Start => {
+                        self.touch_fingers.insert(*id, (*pos, *pos, *pos));
+                    }
+                    TouchPhase::Move => match self.touch_fingers.get_mut(id) {
+                        Some(f) => {
+                            f.1 = f.2;
+                            f.2 = *pos;
+                        }
+                        None => {
+                            self.touch_fingers.insert(*id, (*pos, *pos, *pos));
+                        }
+                    },
+                    TouchPhase::End | TouchPhase::Cancel => {
+                        self.touch_fingers.remove(id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The fingers' separation: their average distance from their centre (screen points), or 0
+    /// with fewer than two.
+    fn finger_spread(&self) -> f32 {
+        let n = self.touch_fingers.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let (mut cx, mut cy) = (0.0_f32, 0.0_f32);
+        for f in self.touch_fingers.values() {
+            cx += f.2.x;
+            cy += f.2.y;
+        }
+        let (cx, cy) = (cx / n as f32, cy / n as f32);
+        let mut d = 0.0_f32;
+        for f in self.touch_fingers.values() {
+            d += ((f.2.x - cx) * (f.2.x - cx) + (f.2.y - cy) * (f.2.y - cy)).sqrt();
+        }
+        d / n as f32
+    }
+
+    /// Which fingers the gesture runs with: the count folded with the touch ids, so a finger
+    /// joining or lifting changes it.
+    fn finger_set(&self) -> u64 {
+        self.touch_fingers.keys().fold(self.touch_fingers.len() as u64, |a, id| (a << 8) ^ id.0.rotate_left(17))
+    }
+
+    /// Whether the two fingers that moved most this frame both moved meaningfully along the
+    /// line through them, the same way — closing or spreading: a pinch's signature. A scroll's
+    /// fingers cross that line, and a staggered scroll's leading finger moves along it alone,
+    /// which is not the same thing (the other hasn't moved at all).
+    fn fingers_on_axis(&self) -> bool {
+        if self.touch_fingers.len() < 2 {
+            return false;
+        }
+        let (mut lo, mut hi) = ((0.0, Vec2::ZERO, Pos2::ZERO), (0.0, Vec2::ZERO, Pos2::ZERO));
+        for f in self.touch_fingers.values() {
+            let v = f.2 - f.1;
+            let s = if v.is_finite() { v.length() } else { 0.0 };
+            if s > hi.0 {
+                lo = hi;
+                hi = (s, v, f.2);
+            } else if s > lo.0 {
+                lo = (s, v, f.2);
+            }
+        }
+        let d = hi.2 - lo.2;
+        let len = d.length();
+        if len < 1e-3 {
+            return false;
+        }
+        let u = d / len; // from the slower finger to the faster
+        let away_lo = -lo.1.dot(u); // the slower's motion away from the faster
+        let away_hi = hi.1.dot(u); // the faster's motion away from the slower
+        let (lesser, greater) = (away_lo.abs().min(away_hi.abs()), away_lo.abs().max(away_hi.abs()));
+        away_lo * away_hi > 0.0 && lesser >= TOUCH_AXIS_DEAD && lesser >= TOUCH_AXIS_SHARE * greater
+    }
+
+    /// Whether some finger has hardly left its landing: a pinch planted on one finger — or a
+    /// scroll whose second finger has yet to follow, which is why the pinch it might still be
+    /// is named only after [`TOUCH_PLANT_PATIENCE`].
+    fn finger_planted(&self) -> bool {
+        self.touch_fingers.values().any(|f| (f.2 - f.0).length() < TOUCH_PLANTED_R)
     }
 }
 
@@ -546,6 +708,64 @@ mod tests {
         )
         .1;
         assert!(near(latch, 1.56), "the frames' product, not just the last: {latch}");
+    }
+
+    /// A scroll whose start is staggered — one finger travelling briskly while the other, just
+    /// landed, has yet to follow — used to be named a pinch by the leading finger's widening of
+    /// the distance, and the page grew and shrank the whole way down (#mobile dogfooding). The
+    /// second finger following within the patience names a scroll, which zooms nothing; a spread
+    /// that keeps going with one finger still planted is named a pinch once the patience has
+    /// passed, its whole travel paid out at once and followed after.
+    #[test]
+    fn a_leading_finger_is_a_scroll_a_planted_spread_a_pinch() {
+        let (ctx, mut n) = (egui::Context::default(), 0);
+        egui_frame(&ctx, &mut n, true, Vec::new());
+        // Finger 0 lands and travels a little; finger 1 lands a moment later.
+        let (mut a, b) = (egui::pos2(150.0, 540.0), egui::pos2(150.0, 700.0));
+        egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::Start, a)]);
+        a = egui::pos2(150.0, 523.0);
+        egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::Move, a)]);
+        egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::Start, a), touch(1, egui::TouchPhase::Start, b)]);
+        // The lead: three frames of travel away from the still finger, each widening the
+        // distance past the pinch latch — none of them zooms while the gesture is unnamed.
+        for i in 0..3 {
+            a = egui::pos2(a.x, a.y - 17.0);
+            let zoom = egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::Move, a)]).1;
+            assert_eq!(zoom, 1.0, "lead frame {i} zooms nothing");
+        }
+        // The second finger follows: the pair travels up together, the distance easing back.
+        for i in 0..6 {
+            a = egui::pos2(a.x, a.y - 25.0);
+            let b2 = egui::pos2(b.x, b.y - 25.0 - i as f32);
+            let zoom = egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::Move, a), touch(1, egui::TouchPhase::Move, b2)]).1;
+            assert_eq!(zoom, 1.0, "travel frame {i} of the staggered scroll zooms nothing");
+        }
+        egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::End, a)]);
+        assert_eq!(egui_frame(&ctx, &mut n, true, Vec::new()).1, 1.0, "nothing left after the fingers lift");
+
+        // A spread that keeps going with one finger planted: within the patience it zooms
+        // nothing, past it the gesture is named a pinch and its travel paid out at once.
+        let (mut a, b) = (egui::pos2(150.0, 540.0), egui::pos2(150.0, 700.0));
+        egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::Start, a), touch(1, egui::TouchPhase::Start, b)]);
+        for k in 1..9 {
+            a = egui::pos2(a.x, a.y - 15.0);
+            let zoom = egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::Move, a)]).1;
+            assert_eq!(zoom, 1.0, "planted frame {k}, inside the patience, zooms nothing");
+        }
+        let mut named = None;
+        for k in 9..14 {
+            a = egui::pos2(a.x, a.y - 15.0);
+            let zoom = egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::Move, a)]).1;
+            if zoom != 1.0 {
+                named = Some((k, zoom));
+                break;
+            }
+        }
+        let (k, zoom) = named.expect("the planted spread is named a pinch once the patience passes");
+        assert!(zoom > 1.3, "its whole travel is paid out at once: {zoom} at frame {k}");
+        a = egui::pos2(a.x, a.y - 15.0);
+        let next = egui_frame(&ctx, &mut n, true, vec![touch(0, egui::TouchPhase::Move, a)]).1;
+        assert!((1.0..1.2).contains(&next), "after the payout the spread is followed: {next}");
     }
 
     /// Builds a move-phase mouse-wheel event from an unknown source with the given unit, delta and
