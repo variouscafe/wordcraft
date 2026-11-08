@@ -5840,3 +5840,81 @@ fn two_swipes_never_zoom_the_page() {
     h.run_steps(4);
     assert!(h.state().session.view.zoom > rest, "a real double-tap still zooms: {rest} -> {}", h.state().session.view.zoom);
 }
+
+/// #mobile dogfooding: a two-finger scroll — the fingers travelling up the screen together,
+/// their distance never quite constant — used to zoom the page wider and narrower the whole
+/// way, so scrolling grew and shrank the page. The gesture is now named at its start and keeps
+/// that name until the fingers lift: a scroll never zooms (one finger never did), a pinch
+/// still does.
+#[test]
+fn two_finger_scrolling_keeps_the_page_size() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), Default::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(390.0, 844.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let touch = |id: u64, phase: egui::TouchPhase, pos: egui::Pos2| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(id),
+        phase,
+        pos,
+        force: None,
+    };
+    let size = |h: &egui_kittest::Harness<'_, WordApp>| (h.state().session.view.zoom, h.state().canvas.page_rects.first().map(|r| r.width()));
+    let before = size(&h);
+
+    // One finger: scrolling, never a zoom.
+    let at = egui::pos2(195.0, 500.0);
+    h.event(touch(0, egui::TouchPhase::Start, at));
+    h.event(egui::Event::PointerMoved(at));
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(2);
+    for y in [460.0, 420.0, 380.0] {
+        let p = egui::pos2(195.0, y);
+        h.event(touch(0, egui::TouchPhase::Move, p));
+        h.event(egui::Event::PointerMoved(p));
+        h.run_steps(2);
+    }
+    h.event(touch(0, egui::TouchPhase::End, egui::pos2(195.0, 380.0)));
+    h.run_steps(4);
+    assert_eq!(size(&h), before, "a one-finger scroll keeps the page size");
+
+    // Two fingers travelling up together, drifting apart and back a little every frame. The
+    // browser reports both moves in one frame, as the pair helper does.
+    let pair = |h: &mut egui_kittest::Harness<'_, WordApp>, a: egui::Event, b: egui::Event| {
+        h.input_mut().events.push(a);
+        h.input_mut().events.push(b);
+        h.step();
+    };
+    let (mut a, mut b) = (egui::pos2(140.0, 400.0), egui::pos2(240.0, 620.0));
+    pair(&mut h, touch(0, egui::TouchPhase::Start, a), touch(1, egui::TouchPhase::Start, b));
+    for (i, drift) in [4.0, -3.0, 3.0, -4.0, 0.0].iter().enumerate() {
+        let (a0, b0) = (a, b);
+        a = egui::pos2(a0.x + drift * (i as f32 % 2.0), a0.y - 30.0);
+        b = egui::pos2(b0.x - drift * (i as f32 % 2.0), b0.y - 30.0);
+        pair(&mut h, touch(0, egui::TouchPhase::Move, a), touch(1, egui::TouchPhase::Move, b));
+        h.run_steps(2);
+        assert_eq!(size(&h), before, "frame {i} of the two-finger scroll keeps the page size");
+    }
+    pair(&mut h, touch(0, egui::TouchPhase::End, a), touch(1, egui::TouchPhase::End, b));
+    h.run_steps(4);
+    assert_eq!(size(&h), before, "the two-finger scroll ends with the page size it began at");
+
+    // A pinch still zooms the page in: the fingers spread apart about the screen's centre.
+    let (a, b) = (egui::pos2(145.0, 500.0), egui::pos2(245.0, 500.0));
+    pair(&mut h, touch(0, egui::TouchPhase::Start, a), touch(1, egui::TouchPhase::Start, b));
+    for x in [115.0, 85.0] {
+        pair(&mut h, touch(0, egui::TouchPhase::Move, egui::pos2(x, 500.0)), touch(1, egui::TouchPhase::Move, egui::pos2(390.0 - x, 500.0)));
+        h.run_steps(2);
+    }
+    pair(&mut h, touch(0, egui::TouchPhase::End, egui::pos2(85.0, 500.0)), touch(1, egui::TouchPhase::End, egui::pos2(305.0, 500.0)));
+    h.run_steps(4);
+    let after = size(&h);
+    assert!(after.0 > before.0, "a pinch zooms the page in: {} -> {}", before.0, after.0);
+}
