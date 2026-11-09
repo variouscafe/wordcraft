@@ -5995,3 +5995,66 @@ fn a_staggered_two_finger_scroll_keeps_the_page_size() {
     h.run_steps(4);
     assert_eq!(size(&h), before, "the staggered scroll ends with the page size it began at");
 }
+
+/// #mobile dogfooding (Android Chrome): one tap on the page zoomed it in and the next tap zoomed
+/// it back out. eframe's web runner reports a finger twice — `PointerButton` from `pointerdown` /
+/// `pointerup` (it never checks `pointerType`), and again from `touchstart` / `touchend` — so one
+/// tap reached egui as two presses and two releases at one spot, which egui counts as a
+/// double-click: the viewer's double-tap zoom. The web host (`touch_pointer_guard`) now stops a
+/// finger's pointer events before eframe sees them, leaving the touch events' one press and one
+/// release. A single tap, repeated, never zooms; a real double-tap still does.
+#[test]
+fn a_single_tap_never_zooms_the_phone_page() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+    app.ui.language = "en".into();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(390.0, 844.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    let rest = h.state().session.view.zoom;
+    let page_w = |h: &egui_kittest::Harness<'_, WordApp>| h.state().canvas.page_rects.first().map(|r| r.width());
+    let rest_w = page_w(&h);
+    assert!(rest_w.is_some(), "the page is laid out");
+    let touch = |phase: egui::TouchPhase, pos: egui::Pos2| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase,
+        pos,
+        force: None,
+    };
+    let press = |pos: egui::Pos2, down: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: down,
+        modifiers: Default::default(),
+    };
+    let at = egui::pos2(195.0, 480.0);
+    // The events as the web host now lets them through: the touch events' press and release.
+    let tap = |h: &mut egui_kittest::Harness<'_, WordApp>| {
+        h.event(touch(egui::TouchPhase::Start, at));
+        h.event(press(at, true));
+        h.run_steps(3);
+        h.event(touch(egui::TouchPhase::End, at));
+        h.event(press(at, false));
+        h.event(egui::Event::PointerGone);
+        h.run_steps(3);
+    };
+    for _ in 0..4 {
+        tap(&mut h);
+        // Far past the double-click window: each tap stands alone.
+        h.run_steps(60);
+        assert_eq!(h.state().session.view.zoom, rest, "a single tap never zooms");
+        assert_eq!(page_w(&h), rest_w, "the page keeps its width");
+        assert!(h.state().canvas.phone_zoom_out.is_none(), "nothing was zoomed away from");
+    }
+    // A real double-tap — the same events twice within the double-click window — still zooms.
+    tap(&mut h);
+    tap(&mut h);
+    h.run_steps(4);
+    assert!(h.state().session.view.zoom > rest, "a real double-tap still zooms: {rest} -> {}", h.state().session.view.zoom);
+}

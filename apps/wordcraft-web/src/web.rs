@@ -45,6 +45,10 @@ pub fn start() {
         if let Err(e) = keyboard_viewport(&canvas) {
             log::error!("no keyboard viewport handling: {e}");
         }
+        // One finger tap is one press: keep the finger's pointer events from eframe (it also reads the touch events).
+        if let Err(e) = crate::touch_pointer_guard::install(&canvas) {
+            log::error!("no touch pointer guard: {e}");
+        }
         let mut options = eframe::WebOptions::default();
         if query().contains("webgl")
             && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
